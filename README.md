@@ -37,9 +37,20 @@ Data root defaults to `P:\all_scripts\oyf_scrape` (set in `web_scrape.js` as `ho
 
 ### 1. Install Node dependencies
 
+`node_modules` must live on a **local disk** — the project root is on pCloud (`P:`),
+and cloud/network drives lock files during sync (`EBUSY`) and slow module loading.
+Install into `%LOCALAPPDATA%\oyf_scrape` (the `.ps1` wrappers expose it to Node via
+`NODE_PATH`, and the DB scripts resolve it via `WEB_SCRAPE_NODE_HOME`):
+
 ```powershell
-npm install @duckdb/node-api dotenv puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
+$dep = "$env:LOCALAPPDATA\oyf_scrape"
+New-Item -ItemType Directory -Force -Path $dep | Out-Null
+Copy-Item -Force node_script\package.json, node_script\package-lock.json $dep
+npm install --prefix $dep
 ```
+
+To use a different location, set `WEB_SCRAPE_NODE_HOME` to the folder that contains
+`node_modules` (the wrappers derive `NODE_PATH` from it).
 
 ### 2. Data layout
 
@@ -426,7 +437,8 @@ web_scrape/
   node_script/
     web_scrape.js                      # scraper (chat | wall | purchases)
     web_scrape_repl.js                 # interactive REPL
-    package.json                       # node deps (npm install here)
+    package.json                       # node deps manifest (installed locally; see Setup)
+    package-lock.json
   scrape_chat.ps1
   scrape_wall.ps1
   scrape_purchases.ps1
@@ -435,7 +447,6 @@ web_scrape/
   analyze_web_db.js                    # read-only size/row-count report (--deep for storage segments)
   run_media_origin_tracker.ps1         # single media-origin report
   run_media_origin_tracker_by_days.ps1 # report for 30/60/90/180/365-day windows
-  node_modules/
   dbt/
     profiles.example.yml
     webDataELT/

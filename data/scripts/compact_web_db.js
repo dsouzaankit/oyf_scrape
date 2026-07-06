@@ -11,10 +11,11 @@ const { pathToFileURL } = require('url');
 const dbPath = (process.argv[2] || process.env.WEB_SCRAPE_DB || 'P:/all_scripts/oyf_scrape/data/web.db')
     .replace(/\\/g, '/');
 
-// @duckdb/node-api is installed in node_script/node_modules (beside web_scrape.js).
-// This script may be run from anywhere (e.g. data/scripts), where default module
-// resolution can't find it, so resolve it from node_script explicitly.
-const NODE_HOME = (process.env.WEB_SCRAPE_NODE_HOME || 'P:/all_scripts/oyf_scrape/node_script')
+// @duckdb/node-api is installed on a local disk (pCloud/network drives lock/slow
+// node_modules), by default under %LOCALAPPDATA%\oyf_scrape\node_modules. This script
+// may be run from anywhere (e.g. data/scripts), where default module resolution can't
+// find it, so resolve it from that folder (dir containing node_modules) explicitly.
+const NODE_HOME = (process.env.WEB_SCRAPE_NODE_HOME || ((process.env.LOCALAPPDATA || 'C:') + '/oyf_scrape'))
     .replace(/\\/g, '/');
 
 async function loadDuckDbApi() {

@@ -2133,8 +2133,8 @@ console.error = function() {
 
 // Create an in-memory database instance (or provide a file path for persistence)
 dbPath = path.join(homeDirectory, 'data\\web.db');
-let { DuckDB } = await import('@duckdb/node-api');
-let { DuckDBInstance } = await import("@duckdb/node-api");
+let { DuckDB } = require('@duckdb/node-api');
+let { DuckDBInstance } = require('@duckdb/node-api');
 // instance = await DuckDBInstance.create(dbPath);
 // instance = await DuckDBInstance.fromCache(dbPath);
 
