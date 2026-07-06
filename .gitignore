@@ -1,0 +1,24 @@
+# Dependencies (reproducible from package.json / package-lock.json)
+node_modules/
+
+# Local secrets and config
+creds.env
+*.env
+
+# DuckDB database + write-ahead logs
+*.db
+*.db.wal
+*.wal
+
+# Runtime output / logs
+logs/
+*.log
+api_out.json
+
+# Chromium profile / session data
+testChromeSession/
+
+# OS cruft
+Thumbs.db
+Desktop.ini
+.DS_Store
