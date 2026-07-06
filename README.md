@@ -122,20 +122,20 @@ dbt test --project-dir webDataELT --profiles-dir .
 ### CLI
 
 ```powershell
-node web_scrape.js chat        # stg_chat_messages + media_dim
-node web_scrape.js wall        # stg_wall_posts
-node web_scrape.js purchases   # stg_chat_unlocks (paid chat unlocks)
-node web_scrape_repl.js        # interactive REPL (all modes)
-node web_scrape.js --repl      # same as web_scrape_repl.js
+node node_script/web_scrape.js chat        # stg_chat_messages + media_dim
+node node_script/web_scrape.js wall        # stg_wall_posts
+node node_script/web_scrape.js purchases   # stg_chat_unlocks (paid chat unlocks)
+node node_script/web_scrape_repl.js        # interactive REPL (all modes)
+node node_script/web_scrape.js --repl      # same as web_scrape_repl.js
 ```
 
 Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_unlocks` / `paid_chat`.
 
 | Launcher | Runs |
 |----------|------|
-| `scrape_chat.ps1` | `node web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
-| `scrape_wall.ps1` | `node web_scrape.js wall` |
-| `scrape_purchases.ps1` | `node web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
+| `scrape_chat.ps1` | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
+| `scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
+| `scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
 | `compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
 
 Run **one mode per invocation** for CLI scrapes — chat, wall, and purchases are separate processes.
@@ -145,8 +145,8 @@ Run **one mode per invocation** for CLI scrapes — chat, wall, and purchases ar
 `web_scrape_repl.js` boots Chromium + DuckDB and opens a prompt (**no** auto-scrape, **no** auto-exit). Works for **all** modes (`scrapeChatMessages`, `scrapeWallPosts`, `scrapeChatUnlocks`). Use top-level `await` (Node 20+).
 
 ```powershell
-node web_scrape_repl.js           # general prompt: web_scrape>
-node web_scrape_repl.js unlocks   # login first; unlocks> + du.* helpers
+node node_script/web_scrape_repl.js           # general prompt: web_scrape>
+node node_script/web_scrape_repl.js unlocks   # login first; unlocks> + du.* helpers
 ```
 
 General:
@@ -172,7 +172,7 @@ await shutdown()
 **Step-by-step:**
 
 ```powershell
-node web_scrape_repl.js unlocks
+node node_script/web_scrape_repl.js unlocks
 ```
 
 ```javascript
@@ -187,7 +187,7 @@ await du.mediaIds(20)
 await du.run()             // full scrapeChatUnlocks() in one call
 ```
 
-**One-shot:** `.\scrape_purchases.ps1` or `node web_scrape.js purchases`  
+**One-shot:** `.\scrape_purchases.ps1` or `node node_script/web_scrape.js purchases`  
 **Artifacts:** `data/api_out.json` (last batch), `logs/scrape_purchases_*.log` (PS1 tee), `logs/error_log_*.log`
 
 **creds.env**
@@ -258,7 +258,7 @@ Get-Process chrome -ErrorAction SilentlyContinue |
   Stop-Process -Force
 ```
 
-Then rerun `node web_scrape.js chat` or `wall`.
+Then rerun `node node_script/web_scrape.js chat` or `wall`.
 
 ## Media origin reporting
 
@@ -423,8 +423,10 @@ Errors are also written to `logs/error_log_<timestamp>.log`.
 
 ```
 web_scrape/
-  web_scrape.js                        # scraper (chat | wall | purchases)
-  web_scrape_repl.js                   # interactive REPL
+  node_script/
+    web_scrape.js                      # scraper (chat | wall | purchases)
+    web_scrape_repl.js                 # interactive REPL
+    package.json                       # node deps (npm install here)
   scrape_chat.ps1
   scrape_wall.ps1
   scrape_purchases.ps1

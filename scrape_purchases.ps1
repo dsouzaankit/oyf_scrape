@@ -37,7 +37,7 @@ function Invoke-NodeScrape {
 $exitCode = 0
 $scrapeFailed = $false
 try {
-    $exitCode = Invoke-NodeScrape -NodeArgs @('web_scrape.js', 'purchases') -LogPath $LogPath
+    $exitCode = Invoke-NodeScrape -NodeArgs @((Join-Path $PSScriptRoot 'node_script\web_scrape.js'), 'purchases') -LogPath $LogPath
     Add-Content -LiteralPath $LogPath -Value "`nfinished: $(Get-Date -Format o)`nexit: $exitCode" -Encoding utf8
     if ($exitCode -ne 0) {
         Write-Host "Scrape failed (exit $exitCode). Skipping media origin tracker."

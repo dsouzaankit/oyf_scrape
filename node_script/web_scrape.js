@@ -7,7 +7,7 @@
 // drop missing, bulky fields (files, videoSources, isMarkdownDisabled) from inferred json schema for efficiency!
 // multiple calls to DuckDBInstance.create(...) raises exception!
 // sample data for initial schema inference: 'Chromium devtools > Filtered Fetch/XHR > Preview > 'list:' (inner) > Copy object'
-// install node packages and run script from C:\Users\...\Downloads\web_scrape\node_scrape
+// install node packages (npm install) in this node_script folder, then run web_scrape.js from here
 // npm install @duckdb/node-api
 // npm install dotenv
 // leftmost web tab is the active one!
