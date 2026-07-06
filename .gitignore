@@ -31,3 +31,7 @@ Desktop.ini
 data/main/
 data/samples/
 data/ign/
+
+# Local-only working folders (AI transcripts, ignored/backup code)
+ai/
+ign/
