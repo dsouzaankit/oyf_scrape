@@ -683,7 +683,7 @@ function seedLocalChromeProfile(localDir, remoteDir) {
     }
 
     const t0 = Date.now();
-    console.log('Seeding local Chrome profile (auth files only from Z:)...');
+    console.log('Seeding local Chrome profile (auth files only from P:)...');
     console.log(`  from: ${remoteDir}`);
     console.log(`  to:   ${localDir}`);
     let copied = 0;
@@ -715,8 +715,8 @@ function copyChromeProfilePath(src, dest) {
 
 function syncLocalChromeProfileToRemote() {
     if (!chromeProfileUsesLocalDisk || !chromeProfileLocalDir || !chromeProfileRemoteDir) return;
-    if (process.env.sync_chrome_profile_to_z === '0') {
-        console.log('Chrome profile sync to Z: disabled (sync_chrome_profile_to_z=0).');
+    if (process.env.sync_chrome_profile_to_p === '0') {
+        console.log('Chrome profile sync to P: disabled (sync_chrome_profile_to_p=0).');
         return;
     }
     if (!fs.existsSync(path.join(chromeProfileLocalDir, 'Default'))) {
@@ -724,7 +724,7 @@ function syncLocalChromeProfileToRemote() {
         return;
     }
     const t0 = Date.now();
-    console.log('Syncing local Chrome profile back to Z:...');
+    console.log('Syncing local Chrome profile back to P:...');
     console.log(`  from: ${chromeProfileLocalDir}`);
     console.log(`  to:   ${chromeProfileRemoteDir}`);
     fs.mkdirSync(chromeProfileRemoteDir, { recursive: true });
@@ -737,13 +737,13 @@ function syncLocalChromeProfileToRemote() {
     console.log(`Chrome profile sync complete (${copied} path(s) in ${((Date.now() - t0) / 1000).toFixed(1)}s).`);
 
     // Delete the local profile after a successful sync so each run starts from a clean
-    // re-seed of Z:. Opt out with keep_local_chrome_profile=1.
+    // re-seed of P:. Opt out with keep_local_chrome_profile=1.
     if (process.env.keep_local_chrome_profile === '1') {
         console.log('Local Chrome profile kept (keep_local_chrome_profile=1).');
         return;
     }
     if (copied === 0) {
-        console.log('Local Chrome profile kept (nothing synced to Z:).');
+        console.log('Local Chrome profile kept (nothing synced to P:).');
         return;
     }
     try {
@@ -1550,7 +1550,7 @@ async function relaunchBrowserAfterProfileRepair() {
 ({ launchedBrowser, browser, weLaunched } = await launchAndConnectBrowser(
     puppeteerLauncher, browserStateDataFolder, browserLaunchOptions
 ));
-console.log('web_scrape.js build: nav-v57 (delete local profile after Z: sync each run)');
+console.log('web_scrape.js build: nav-v57 (delete local profile after P: sync each run)');
 
 // Windows: raise Chromium to the OS foreground (CDP alone often leaves the window behind other apps).
 function focusChromeProcessWindow(rootPid) {

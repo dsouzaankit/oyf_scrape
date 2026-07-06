@@ -237,7 +237,7 @@ Entry point is `async function main()` so CommonJS `require()` works with async 
 
 Persistent profile source: `data/testChromeSession/` on the data root (cookies/session).
 
-**Network drive (`Z:` / Koofr):** Chromium often **crashes on navigation** when the profile lives on a mapped network drive. The scraper **automatically uses a local copy** at `%LOCALAPPDATA%\web_scrape\testChromeSession` (one-time **auth-only** seed from `Z:` — not a full 140MB copy). On shutdown it **syncs session cookies/login back** to `data/testChromeSession/` on `Z:` (disable with `sync_chrome_profile_to_z=0`). Override with `chrome_user_data_dir` or `use_local_chrome_profile=0` in `creds.env` to force the remote profile. Set `refresh_local_chrome_profile=1` once to wipe and re-seed the local profile.
+**Cloud/network drive (`P:` / pCloud):** Chromium often **crashes on navigation** when the profile lives on a cloud-synced or mapped network drive. The scraper **automatically uses a local copy** at `%LOCALAPPDATA%\web_scrape\testChromeSession` (one-time **auth-only** seed from `P:` — not a full 140MB copy). On shutdown it **syncs session cookies/login back** to `data/testChromeSession/` on `P:` (disable with `sync_chrome_profile_to_p=0`). Override with `chrome_user_data_dir` or `use_local_chrome_profile=0` in `creds.env` to force the remote profile. Set `refresh_local_chrome_profile=1` once to wipe and re-seed the local profile.
 
 **Startup (`launchAndConnectBrowser`):**
 
@@ -351,7 +351,7 @@ Run compaction when the scraper and DuckDB CLI are **not** holding a write lock:
 
 Logs to `logs/compact_web_db_*.log`. Override data root with `$env:WEB_SCRAPE_HOME` (same as scrape scripts).
 
-**When to run:** once after upgrading from pre–nav-v31 history bloat (~600 MB → ~55 MB typical); then optionally after chat scrapes that pruned, or weekly if `web.db` grows on `Z:` sync. `VACUUM` on a network drive can take minutes — not chained into `scrape_chat.ps1` by default.
+**When to run:** once after upgrading from pre–nav-v31 history bloat (~600 MB → ~55 MB typical); then optionally after chat scrapes that pruned, or weekly if `web.db` grows on `P:` sync. `VACUUM` on a cloud/network drive can take minutes — not chained into `scrape_chat.ps1` by default.
 
 Direct Node usage:
 
