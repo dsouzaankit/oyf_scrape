@@ -28,9 +28,8 @@ Desktop.ini
 *.ducklake.files/
 
 # Data content (repo keeps only utility scripts under data/scripts/)
-data/main/
-data/samples/
-data/ign/
+data/*
+!data/scripts/
 
 # Local-only working folders (AI transcripts, ignored/backup code)
 ai/
