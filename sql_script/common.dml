@@ -1,0 +1,129 @@
+-- await instance.closeSync();
+-- .open Z:\\STUDY\\web_scrape\\data\\web.db
+.open 'C:/Users/dsouzaankit/Downloads/web_scrape/dbt/data/web.db';
+USE web;
+
+.tables
+
+desc stg_chat_messages;
+select count(1) n_rows, count(distinct id) from stg_chat_messages;	-- 54
+
+with t1 as (
+select id chat_id
+, json_extract_string(fromUser, '$.id') author_id
+, json_extract_string(unnest(media), '$.id') media_id
+, price msg_price
+, cast(json_extract_string(unnest(media), '$.duration') AS int) media_duration
+, date(cast(createdAt as timestamp)) created_date
+from stg_chat_messages
+)
+select * from t1
+where media_duration > 0;
+
+with t1 as (
+select id chat_id
+, json_extract_string(fromUser, '$.id') author_id
+, json_extract_string(unnest(media), '$.id') media_id
+, price msg_price
+, cast(json_extract_string(unnest(media), '$.duration') AS int) media_duration
+, date(cast(createdAt as timestamp)) created_date
+from stg_chat_messages
+)
+select * from t1
+where author_id = '180951488'
+and media_id = '4243934481';
+
+select text
+FROM stg_chat_messages cm,
+     unnest(cm.media) AS u(m)
+WHERE json_extract_string(cm.fromUser, '$.id') = '253745725'
+  AND cast(m.id AS VARCHAR) = '4241839416';
+
+desc stg_wall_posts;
+select count(1), count(distinct id) from stg_wall_posts; -- 652
+
+select json_extract_string(author, '$.id') author_id
+, id post_id
+, json_extract_string(unnest(media), '$.id') media_id
+, date(cast(postedAt as timestamp)) posted_date
+from stg_wall_posts;
+
+
+with t1 as (
+select json_extract_string(author, '$.id') author_id
+, id post_id
+, json_extract_string(unnest(media), '$.id') media_id
+, cast(postedAt as timestamp) posted_ts
+, date(cast(postedAt as timestamp)) posted_date
+from stg_wall_posts
+)
+, t2 as (
+select *
+, lead(media_id, 1) over (partition by author_id order by media_id) next_media_id
+, lead(posted_ts, 1) over (partition by author_id order by media_id) next_media_id_ts
+from t1
+)
+select cm.media_id, t2. 
+from t2 inner join stg_chat_messages cm
+on t2.author_id = cm.author_id
+and cm.media_id < t2.media_id < cm
+;
+
+
+DESC src_media_dim;
+SELECT * FROM src_media_dim;
+
+-- grain check
+select count(1) n_rows
+, count(distinct row(media_id, author_id, valid_from_ts)) n_grain
+from media_dim;
+-- grain check, dbt clone
+select count(1) n_rows
+, count(distinct row(media_id, author_id, valid_from_ts)) n_grain
+from dbt_media_dim;
+
+select
+*
+-- media_id, author_id, valid_from_ts
+from media_dim
+where media_id = '4319299485' and valid_from_ts = '2026-03-05 03:49:53'
+-- group by media_id, author_id, valid_from_ts
+-- having count(1) > 1
+;
+
+-- delete from media_dim;
+select author_id, media_id, seen_count, media_duration, valid_from_ts, valid_to_ts, is_current, is_deleted
+from dbt_media_dim
+where media_duration > 0
+and seen_count = 1
+order by author_id, media_id, valid_from_ts, seen_count;
+
+select author_id, media_id, seen_count, media_duration, valid_from_ts, valid_to_ts, is_current, is_deleted
+from dbt_media_dim
+where media_duration > 0
+and (seen_count > 1 or not is_current)
+order by author_id, media_id, valid_from_ts, seen_count;
+
+
+select count(1) from (
+select * exclude(extract_ts) from media_dim
+except
+select * exclude(is_deleted, extract_ts) from dbt_media_dim
+);  -- 0
+select count(1) from (
+select * exclude(is_deleted, extract_ts) from dbt_media_dim
+except
+select * exclude(extract_ts) from media_dim
+);  -- 0
+
+
+-- use below as proxy to unlock web.db!
+ATTACH 'Z:\\STUDY\\web_scrape\\data\\web_test.db';
+USE web_test;
+DETACH web;
+-- instance = await DuckDBInstance.create(dbPath);
+
+-- DELETE FROM stg_chat_messages;
+-- DELETE FROM stg_chat_messages where json_extract_string(fromUser, '$.id') = '180951488';
+
+-- .exit

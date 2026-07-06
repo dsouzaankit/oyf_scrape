@@ -22,3 +22,7 @@ testChromeSession/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# DuckLake catalog + data
+*.ducklake
+*.ducklake.files/
