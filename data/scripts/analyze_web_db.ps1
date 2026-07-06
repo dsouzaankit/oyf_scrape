@@ -2,7 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
-$HomeDirectory = if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'Z:\STUDY\web_scrape' }
+$HomeDirectory = if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'P:\all_scripts\oyf_scrape' }
 $DbPath = Join-Path $HomeDirectory 'data\web.db'
 $LogsFolder = Join-Path $HomeDirectory 'logs'
 New-Item -ItemType Directory -Force -Path $LogsFolder | Out-Null

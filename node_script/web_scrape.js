@@ -540,7 +540,7 @@ async function launchAndConnectBrowser(puppeteer, userDataDir, launchOptions) {
 }
 
 const urlCache = new Map();
-homeDirectory = (process.env.WEB_SCRAPE_HOME || 'Z:\\STUDY\\web_scrape').replace(/\//g, '\\');
+homeDirectory = (process.env.WEB_SCRAPE_HOME || 'P:\\all_scripts\\oyf_scrape').replace(/\//g, '\\');
 credsPath = path.join(homeDirectory, 'data', 'creds.env');
 
 function loadCredsEnv(filePath) {

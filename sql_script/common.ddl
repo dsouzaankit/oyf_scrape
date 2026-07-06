@@ -1,18 +1,18 @@
 -- await instance.closeSync();
 -- await connection.closeSync();
--- ATTACH 'Z:\\STUDY\\web_scrape\\data\\web.db';
+-- ATTACH 'P:\\all_scripts\\oyf_scrape\\data\\web.db';
 ATTACH 'C:/Users/dsouzaankit/Downloads/web_scrape/dbt/data/web.db';
 USE web;
--- .cd Z:\\STUDY\\web_scrape\\data
--- ATTACH 'ducklake:my_ducklake.ducklake' AS my_ducklake (DATA_PATH 'Z:\\STUDY\\web_scrape\\data');
+-- .cd P:\\all_scripts\\oyf_scrape\\data
+-- ATTACH 'ducklake:my_ducklake.ducklake' AS my_ducklake (DATA_PATH 'P:\\all_scripts\\oyf_scrape\\data');
 -- USE my_ducklake;
 
 -- INSTALL ducklake;
 -- LOAD ducklake;
--- .open Z:\\STUDY\\web_scrape\\data\\web.db
--- ATTACH 'Z:\\STUDY\\web_scrape\\data\\web.db';
+-- .open P:\\all_scripts\\oyf_scrape\\data\\web.db
+-- ATTACH 'P:\\all_scripts\\oyf_scrape\\data\\web.db';
 -- USE web;
--- ATTACH 'ducklake:my_ducklake.ducklake' AS my_ducklake (DATA_PATH 'Z:\\STUDY\\web_scrape\\data');
+-- ATTACH 'ducklake:my_ducklake.ducklake' AS my_ducklake (DATA_PATH 'P:\\all_scripts\\oyf_scrape\\data');
 -- USE my_ducklake;
 -- CREATE TABLE my_ducklake.media_dim AS SELECT * FROM web.media_dim_v2;
 -- CREATE TABLE my_ducklake.stg_chat_messages AS SELECT * FROM web.stg_chat_messages;
@@ -21,7 +21,7 @@ USE web;
 .tables
 
 
-SET file_search_path = 'Z:/STUDY/web_scrape';
+SET file_search_path = 'P:/all_scripts/oyf_scrape';
 
 CREATE TABLE IF NOT EXISTS stg_chat_messages AS SELECT * FROM read_json_auto('data/samples/api_chat_messages.json');
 -- TRUNCATE stg_chat_messages;
@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS dbt_media_dim_history (
 
 
 -- use below as proxy to unlock web.db!
-ATTACH 'Z:\\STUDY\\web_scrape\\data\\web_test.db';
+ATTACH 'P:\\all_scripts\\oyf_scrape\\data\\web_test.db';
 USE web_test;
 DETACH web;
 -- instance = await DuckDBInstance.create(dbPath);

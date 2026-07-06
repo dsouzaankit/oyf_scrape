@@ -24,7 +24,7 @@ sql_script/media_origin_date_tracker_multi_author.sql  →  approx wall-post ori
 | `sql_script/` | Ad-hoc DuckDB analysis scripts |
 | `dbt/webDataELT/` | dbt models for media dimension ELT |
 
-Data root defaults to `Z:\STUDY\web_scrape` (set in `web_scrape.js` as `homeDirectory`). Scripts and scrapers can run from this repo while data lives on that path.
+Data root defaults to `P:\all_scripts\oyf_scrape` (set in `web_scrape.js` as `homeDirectory`). Scripts and scrapers can run from this repo while data lives on that path.
 
 ## Prerequisites
 
@@ -44,7 +44,7 @@ npm install @duckdb/node-api dotenv puppeteer puppeteer-extra puppeteer-extra-pl
 ### 2. Data layout
 
 ```
-{homeDirectory}/          # default: Z:\STUDY\web_scrape
+{homeDirectory}/          # default: P:\all_scripts\oyf_scrape
   data/
     creds.env             # secrets + URLs (not committed)
     web.db                # DuckDB file
@@ -85,11 +85,11 @@ Bootstrap staging tables from a sample API response (save one batch to `api_out.
 
 ```sql
 CREATE TABLE IF NOT EXISTS stg_chat_messages AS
-SELECT * FROM read_json_auto('Z:/STUDY/web_scrape/data/api_out.json', union_by_name=true)
+SELECT * FROM read_json_auto('P:/all_scripts/oyf_scrape/data/api_out.json', union_by_name=true)
 LIMIT 0;
 
 CREATE TABLE IF NOT EXISTS stg_wall_posts AS
-SELECT * FROM read_json_auto('Z:/STUDY/web_scrape/data/api_out.json', union_by_name=true)
+SELECT * FROM read_json_auto('P:/all_scripts/oyf_scrape/data/api_out.json', union_by_name=true)
 LIMIT 0;
 
 -- stg_chat_unlocks is auto-created on first purchases scrape if missing
@@ -356,7 +356,7 @@ Logs to `logs/compact_web_db_*.log`. Override data root with `$env:WEB_SCRAPE_HO
 Direct Node usage:
 
 ```powershell
-node compact_web_db.js Z:\STUDY\web_scrape\data\web.db
+node compact_web_db.js P:\all_scripts\oyf_scrape\data\web.db
 ```
 
 ### Inspect size and row counts (read-only)
@@ -365,7 +365,7 @@ node compact_web_db.js Z:\STUDY\web_scrape\data\web.db
 
 ```powershell
 node analyze_web_db.js
-node analyze_web_db.js Z:\STUDY\web_scrape\data\web.db
+node analyze_web_db.js P:\all_scripts\oyf_scrape\data\web.db
 node analyze_web_db.js --deep
 ```
 
@@ -443,7 +443,7 @@ web_scrape/
   job_reqs_book_matcher/               # unrelated subproject
 ```
 
-On `Z:\STUDY\web_scrape` (data root): `data/`, `logs/`, `sql_script/`.
+On `P:\all_scripts\oyf_scrape` (data root): `data/`, `logs/`, `sql_script/`.
 
 ## License
 

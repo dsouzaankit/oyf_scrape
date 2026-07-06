@@ -26,3 +26,8 @@ Desktop.ini
 # DuckLake catalog + data
 *.ducklake
 *.ducklake.files/
+
+# Data content (repo keeps only utility scripts under data/scripts/)
+data/main/
+data/samples/
+data/ign/

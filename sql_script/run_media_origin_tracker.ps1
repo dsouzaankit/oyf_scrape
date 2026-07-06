@@ -4,10 +4,10 @@
 #   .\run_media_origin_tracker.ps1
 #   .\run_media_origin_tracker.ps1 -AuthorId 180951488
 #   .\run_media_origin_tracker.ps1 -OriginDaysLast 90
-#   .\run_media_origin_tracker.ps1 -HomeDirectory Z:\STUDY\web_scrape -Writable
+#   .\run_media_origin_tracker.ps1 -HomeDirectory P:\all_scripts\oyf_scrape -Writable
 
 param(
-    [string] $HomeDirectory = $(if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'Z:\STUDY\web_scrape' }),
+    [string] $HomeDirectory = $(if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'P:\all_scripts\oyf_scrape' }),
     [string] $AuthorId,
     [int] $OriginDaysLast,
     [string] $SqlPath,

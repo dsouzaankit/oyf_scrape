@@ -6,7 +6,7 @@
 #   .\run_media_origin_tracker_by_days.ps1 -AuthorId 180951488
 
 param(
-    [string] $HomeDirectory = $(if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'Z:\STUDY\web_scrape' }),
+    [string] $HomeDirectory = $(if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'P:\all_scripts\oyf_scrape' }),
     [string] $AuthorId,
     [int[]] $Days = @(30, 60, 90, 180, 365),
     [string] $SqlPath,

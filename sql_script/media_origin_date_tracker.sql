@@ -1,6 +1,6 @@
 -- await instance.closeSync();
 -- await connection.closeSync();
-ATTACH 'Z:\\STUDY\\web_scrape\\data\\web.db' AS web (TYPE DUCKDB);
+ATTACH 'P:\\all_scripts\\oyf_scrape\\data\\web.db' AS web (TYPE DUCKDB);
 USE web;
 
 

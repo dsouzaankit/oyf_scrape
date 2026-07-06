@@ -1,5 +1,5 @@
 -- await instance.closeSync();
--- .open Z:\\STUDY\\web_scrape\\data\\web.db
+-- .open P:\\all_scripts\\oyf_scrape\\data\\web.db
 .open 'C:/Users/dsouzaankit/Downloads/web_scrape/dbt/data/web.db';
 USE web;
 
@@ -118,7 +118,7 @@ select * exclude(extract_ts) from media_dim
 
 
 -- use below as proxy to unlock web.db!
-ATTACH 'Z:\\STUDY\\web_scrape\\data\\web_test.db';
+ATTACH 'P:\\all_scripts\\oyf_scrape\\data\\web_test.db';
 USE web_test;
 DETACH web;
 -- instance = await DuckDBInstance.create(dbPath);

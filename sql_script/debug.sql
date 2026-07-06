@@ -1,4 +1,4 @@
-ATTACH 'Z:\\STUDY\\web_scrape\\data\\web.db' AS web (TYPE DUCKDB);
+ATTACH 'P:\\all_scripts\\oyf_scrape\\data\\web.db' AS web (TYPE DUCKDB);
 USE web;
 
 INSERT INTO stg_chat_messages (responseType, text, giphyId, lockedText, isFree, price, isMediaReady, mediaCount, media, previews, isTip, isReportedByMe, isCouplePeopleMedia, queueId, isMarkdownDisabled, fromUser, isFromQueue, canUnsendQueue, unsendSecondsQueue, id, isOpened, isNew, createdAt, changedAt, cancelSeconds, isLiked, canPurchase, canPurchaseReason, canReport, canBePinned, isPinned)
@@ -14,7 +14,7 @@ SELECT cm.responseType AS responseType, cm.text AS text, cm.giphyId AS giphyId, 
                 duration := COALESCE(CAST(json_extract(to_json(m), '$.duration') AS BIGINT), 0),
                 hasCustomPreview := COALESCE(CAST(json_extract(to_json(m), '$.hasCustomPreview') AS BOOLEAN), false)
             )) AS media, cm.previews AS previews, cm.isTip AS isTip, cm.isReportedByMe AS isReportedByMe, cm.isCouplePeopleMedia AS isCouplePeopleMedia, cm.queueId AS queueId, cm.isMarkdownDisabled AS isMarkdownDisabled, cm.fromUser AS fromUser, cm.isFromQueue AS isFromQueue, cm.canUnsendQueue AS canUnsendQueue, cm.unsendSecondsQueue AS unsendSecondsQueue, cm.id AS id, cm.isOpened AS isOpened, cm.isNew AS isNew, cm.createdAt AS createdAt, cm.changedAt AS changedAt, cm.cancelSeconds AS cancelSeconds, cm.isLiked AS isLiked, cm.canPurchase AS canPurchase, cm.canPurchaseReason AS canPurchaseReason, cm.canReport AS canReport, cm.canBePinned AS canBePinned, cm.isPinned AS isPinned
-        FROM read_json_auto('Z:\STUDY\web_scrape\data\api_out.json', union_by_name=true) cm
+        FROM read_json_auto('P:\all_scripts\oyf_scrape\data\api_out.json', union_by_name=true) cm
 
                 WHERE false
                 or cast(cm.createdAt as timestamp) < (
@@ -28,7 +28,7 @@ SELECT cm.responseType AS responseType, cm.text AS text, cm.giphyId AS giphyId, 
 
 
 select count(1) 
-FROM read_json_auto('Z:\STUDY\web_scrape\data\api_out.json', union_by_name=true) cm
+FROM read_json_auto('P:\all_scripts\oyf_scrape\data\api_out.json', union_by_name=true) cm
 where cast(cm.createdAt as timestamp) > (
 select coalesce(max(cast(createdAt as timestamp)), current_localtimestamp() - interval '99' year)
 from stg_chat_messages where json_extract_string(fromUser, '$.id') = json_extract_string(cm.fromUser, '$.id')
@@ -36,7 +36,7 @@ from stg_chat_messages where json_extract_string(fromUser, '$.id') = json_extrac
 ;
 
 select count(1) 
-FROM read_json_auto('Z:\STUDY\web_scrape\data\api_out.json', union_by_name=true)
+FROM read_json_auto('P:\all_scripts\oyf_scrape\data\api_out.json', union_by_name=true)
 where json_extract_string(fromUser, '$.id') = '253745725'
 ;
 

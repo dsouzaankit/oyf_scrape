@@ -5,20 +5,20 @@
  *   node analyze_web_db.js [path/to/web.db]
  *   node analyze_web_db.js --deep [path/to/web.db]
  *
- * Default path: Z:/STUDY/web_scrape/data/web.db
+ * Default path: P:/all_scripts/oyf_scrape/data/web.db
  * Safe to run while the scraper holds a write lock (opens read-only).
  */
 const { pathToFileURL } = require('url');
 
 const dbPathArg = process.argv.filter((a) => !a.startsWith('-'));
 const deep = process.argv.includes('--deep') || process.argv.includes('-d');
-const dbPath = (dbPathArg[2] || process.env.WEB_SCRAPE_DB || 'Z:/STUDY/web_scrape/data/web.db')
+const dbPath = (dbPathArg[2] || process.env.WEB_SCRAPE_DB || 'P:/all_scripts/oyf_scrape/data/web.db')
     .replace(/\\/g, '/');
 
-// @duckdb/node-api is installed in node_scrape/node_modules (beside web_scrape.js).
+// @duckdb/node-api is installed in node_script/node_modules (beside web_scrape.js).
 // This script may be run from anywhere (e.g. data/scripts), where default module
-// resolution can't find it, so resolve it from node_scrape explicitly.
-const NODE_HOME = (process.env.WEB_SCRAPE_NODE_HOME || 'Z:/STUDY/web_scrape/node_scrape')
+// resolution can't find it, so resolve it from node_script explicitly.
+const NODE_HOME = (process.env.WEB_SCRAPE_NODE_HOME || 'P:/all_scripts/oyf_scrape/node_script')
     .replace(/\\/g, '/');
 
 async function loadDuckDbApi() {
