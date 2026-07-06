@@ -300,7 +300,7 @@ function forceClearProfileLocks(userDataDir) {
     }
 }
 
-function resolveLaunchExecutable(puppeteer) {
+async function resolveLaunchExecutable(puppeteer) {
     const explicit = (process.env.chrome_executable_path || '').trim();
     if (explicit && fs.existsSync(explicit)) return explicit;
     if (process.env.use_system_chrome === '1') {
@@ -313,18 +313,20 @@ function resolveLaunchExecutable(puppeteer) {
             if (c && fs.existsSync(c)) return c;
         }
     }
+    // Newer Puppeteer (>=23) returns a Promise from executablePath(); older versions return a string.
+    // Promise.resolve() normalizes both so fs.existsSync() gets a real path.
     for (const mod of ['puppeteer', 'puppeteer-core']) {
         try {
             const pp = require(mod);
             if (typeof pp.executablePath === 'function') {
-                const p = pp.executablePath();
+                const p = await Promise.resolve(pp.executablePath());
                 if (p && fs.existsSync(p)) return p;
             }
         } catch (_) {}
     }
     try {
         if (typeof puppeteer.executablePath === 'function') {
-            const p = puppeteer.executablePath();
+            const p = await Promise.resolve(puppeteer.executablePath());
             if (p && fs.existsSync(p)) return p;
         }
     } catch (_) {}
@@ -472,7 +474,7 @@ async function puppeteerLaunchWithRetry(puppeteer, userDataDir, launchOptions) {
         assertProfileUnlocked(userDataDir);
         await sleepMs(attempt === 1 ? 2000 : 8000);
 
-        const executablePath = resolveLaunchExecutable(puppeteer);
+        const executablePath = await resolveLaunchExecutable(puppeteer);
         if (!executablePath) {
             throw new Error(
                 'Chromium executable not found. Install bundled browser with: npx puppeteer browsers install chrome'
@@ -579,7 +581,7 @@ function isNetworkDrivePath(dirPath) {
             `  $p = Get-PSDrive -Name '${letter}' -ErrorAction SilentlyContinue`,
             '  if ($p -and $p.DisplayRoot -match "^\\\\\\\\") { "unc" }',
             '}',
-        ].join('; ');
+        ].join("\n");
         const out = execFileSync('powershell.exe', [
             '-NoProfile', '-NonInteractive', '-Command', script,
         ], { encoding: 'utf8', windowsHide: true }).trim();
