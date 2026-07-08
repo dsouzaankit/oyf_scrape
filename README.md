@@ -81,6 +81,7 @@ of_web=https://...com
 chat_thread=https://...com/my/chats/chat/<author_id>
 wall_profile=https://...com/<creator>
 media_dim_history_retain_runs=5
+wall_scrape_max_age_days=730
 
 # alternate author (ignored)
 // chat_thread=https://...com/my/chats/chat/<other_author_id>
@@ -95,7 +96,11 @@ Control which creator is scraped by setting the active `chat_thread` and `wall_p
 
 Scripts live under `local_run/local_setup/`.
 
+**Add author (interactive):** `add_creds_author.ps1` prompts for `chat_thread` and `wall_profile` URLs, appends the pair to `creds.env` (commented), writes `set_creds_author_<author_id>.ps1`, and optionally activates the author.
+
 ```powershell
+& '.\local_run\local_setup\add_creds_author.ps1'
+& '.\local_run\local_setup\add_creds_author.ps1' -Activate
 & '.\local_run\local_setup\set_creds_author.ps1' -List
 & '.\local_run\local_setup\set_creds_author.ps1' -AuthorId 180951488
 & '.\local_run\local_setup\set_creds_author.ps1'                    # interactive menu
@@ -108,7 +113,7 @@ Scripts live under `local_run/local_setup/`.
 | `local_run/local_setup/set_creds_author_180951488.ps1` | `180951488` |
 | `local_run/local_setup/set_creds_author_253745725.ps1` | `253745725` |
 
-Add another author by copying a pair in `creds.env`, then copying an existing `set_creds_author_<author_id>.ps1` (filename = author_id) and updating `-AuthorId` inside.
+Add another author with `add_creds_author.ps1` (recommended), or copy an existing pair + `set_creds_author_<author_id>.ps1` manually.
 
 The numeric segment in `chat_thread` (`/chat/<author_id>`) is also used by the media-origin reporting scripts to filter results.
 
@@ -169,6 +174,7 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_u
 | `local_run/scrape_chat.ps1` | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
 | `local_run/scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
 | `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
+| `local_run/local_setup/add_creds_author.ps1` | Interactive add author URLs + create `set_creds_author_<author_id>.ps1` |
 | `local_run/local_setup/set_creds_author.ps1` | Activate one author in `data/creds.env` (`chat_thread` + `wall_profile` pair) |
 | `local_run/local_setup/set_creds_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
 | `data/scripts/compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
@@ -249,7 +255,7 @@ If a click misses, set the matching selector in `creds.env` to the live CSS id/c
 
 **Chat:** stays on `chat_thread`; intercepts `api2/v2/chats/…/messages`, loads `stg_chat_messages`, scrolls **up**.
 
-**Wall:** navigates to `wall_profile`; intercepts posts API, scrolls **down** until high watermark or `hasMore=false`.
+**Wall:** navigates to `wall_profile`; intercepts posts API, scrolls **down** until high watermark, a **2-year** `postedAt` cutoff (`wall_scrape_max_age_days=730` in `creds.env`), or `hasMore=false`.
 
 **Purchases:** navigates to `of_web` (its home is ok after login — **not** used as login entry), **clicks** `#Purchased` then `#purchased-chat` (overrides: `purchases_tab_selector`, `purchases_click_selector`), scrolls **down**, loads `stg_chat_unlocks`.
 
@@ -340,7 +346,7 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-CredsPath`, `-DuckDbE
 
 **Chat / wall inserts** use a per-author timestamp watermark: only rows with `createdAt` / `postedAt` outside the existing min/max for that author are inserted.
 
-**Wall scroll stop:** before scrolling, reads `max(postedAt)` for the author from `stg_wall_posts`. After each API batch (newest-first / `publish_date_desc`), stops when `hasMore=false`, when the batch’s newest `postedAt` is at or below that high watermark, or when the batch inserts zero rows. Avoids scrolling into older backfill territory (`postedAt < min`) after incremental catch-up.
+**Wall scroll stop:** before scrolling, reads `max(postedAt)` for the author from `stg_wall_posts` and computes a lower bound `postedAt >= now - wall_scrape_max_age_days` (default **730** days / ~2 years). After each API batch (newest-first / `publish_date_desc`), only posts inside that window are loaded. Stops when `hasMore=false`, when the batch’s oldest `postedAt` is before the cutoff, when the batch’s newest `postedAt` is at or below the DB high watermark, or when the batch inserts zero rows.
 
 **Chat scroll stop** (scroll **up**, API `order=desc`): after reload, processes one batch at a time (waits for DuckDB load before next scroll). Stops when:
 
@@ -468,6 +474,7 @@ web_scrape/
     scrape_wall.ps1
     scrape_purchases.ps1
     local_setup/
+      add_creds_author.ps1             # interactive add author + one-click script
       set_creds_author.ps1             # switch active author in creds.env
       set_creds_author_180951488.ps1   # one-click activate author_id 180951488
       set_creds_author_253745725.ps1   # one-click activate author_id 253745725

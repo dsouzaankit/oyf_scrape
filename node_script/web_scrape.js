@@ -2368,16 +2368,37 @@ async function getChatCreatedAtBoundsMs(chatUserId) {
     }
 }
 
-function getBatchMaxPostedAtMs(list) {
-    if (!list?.length) return null;
-    let max = null;
+function getBatchMinMaxPostedAtMs(list) {
+    if (!list?.length) return { minMs: null, maxMs: null };
+    let minMs = null;
+    let maxMs = null;
     for (const post of list) {
         if (!post?.postedAt) continue;
         const t = new Date(post.postedAt).getTime();
         if (!Number.isFinite(t)) continue;
-        if (max === null || t > max) max = t;
+        if (minMs === null || t < minMs) minMs = t;
+        if (maxMs === null || t > maxMs) maxMs = t;
     }
-    return max;
+    return { minMs, maxMs };
+}
+
+function getBatchMaxPostedAtMs(list) {
+    return getBatchMinMaxPostedAtMs(list).maxMs;
+}
+
+function getWallScrapeMinPostedAtMs() {
+    const raw = parseInt(process.env.wall_scrape_max_age_days || '730', 10);
+    const days = Number.isFinite(raw) && raw > 0 ? raw : 730;
+    return Date.now() - days * 86400000;
+}
+
+function filterWallPostsByMinPostedAt(list, minPostedAtMs) {
+    if (minPostedAtMs == null || !list?.length) return list || [];
+    return list.filter((post) => {
+        if (!post?.postedAt) return false;
+        const t = new Date(post.postedAt).getTime();
+        return Number.isFinite(t) && t >= minPostedAtMs;
+    });
 }
 
 async function getWallPostedAtHighWatermarkMs(authorId) {
@@ -3063,6 +3084,8 @@ let needToScrollDn = true;
     let highWatermarkMs = null;
     const enqueueWallBatch = createBatchQueue();
     const authorId = getAuthorIdFromCreds();
+    const wallMinPostedAtMs = getWallScrapeMinPostedAtMs();
+    const wallMaxAgeDays = process.env.wall_scrape_max_age_days || '730';
 
     const onWallResponse = async (response) => {
         const url = response.url();
@@ -3070,9 +3093,10 @@ let needToScrollDn = true;
       try {
         const jsonResponse = await response.json();
             enqueueWallBatch(async () => {
-                const list = trimWallPostListForDb(jsonResponse['list'] || []);
-                const batchMaxMs = getBatchMaxPostedAtMs(list);
-                console.log(`Wall API batch: ${list.length} posts`);
+                const trimmed = trimWallPostListForDb(jsonResponse['list'] || []);
+                const { minMs: batchMinMs, maxMs: batchMaxMs } = getBatchMinMaxPostedAtMs(trimmed);
+                const list = filterWallPostsByMinPostedAt(trimmed, wallMinPostedAtMs);
+                console.log(`Wall API batch: ${trimmed.length} posts (${list.length} within ${wallMaxAgeDays}-day window)`);
                 idleScrolls = 0;
                 const batchPath = path.join(homeDirectory, 'data', `api_out_wall_${Date.now()}.json`);
                 writeJsonFileAtomic(batchPath, list);
@@ -3083,6 +3107,12 @@ let needToScrollDn = true;
 
                 if (!jsonResponse['hasMore']) {
                     console.log('Wall API hasMore=false; stopping scroll.');
+                    needToScrollDn = false;
+                } else if (batchMinMs != null && batchMinMs < wallMinPostedAtMs) {
+                    console.log(
+                        `Batch oldest postedAt ${new Date(batchMinMs).toISOString()} ` +
+                        `is before ${wallMaxAgeDays}-day cutoff ${new Date(wallMinPostedAtMs).toISOString()}; stopping wall scroll.`
+                    );
                     needToScrollDn = false;
                 } else if (highWatermarkMs != null && batchMaxMs != null && batchMaxMs <= highWatermarkMs) {
                     console.log(
@@ -3106,11 +3136,15 @@ let needToScrollDn = true;
             blockOyfHome: true,
         });
         logStep('Wall profile loaded; reading high watermark from DuckDB...');
+        console.log(
+            `Wall scrape window: postedAt >= ${new Date(wallMinPostedAtMs).toISOString()} ` +
+            `(wall_scrape_max_age_days=${wallMaxAgeDays})`
+        );
         highWatermarkMs = await getWallPostedAtHighWatermarkMs(authorId);
         if (highWatermarkMs != null) {
             console.log(`Wall high watermark max(postedAt) for author ${authorId}: ${new Date(highWatermarkMs).toISOString()}`);
         } else {
-            console.log(`No existing wall posts for author ${authorId}; scrolling until hasMore=false.`);
+            console.log(`No existing wall posts for author ${authorId}; scrolling until cutoff or hasMore=false.`);
         }
         needToScrollDn = true;
         while (needToScrollDn && scrollCount < 500) {
