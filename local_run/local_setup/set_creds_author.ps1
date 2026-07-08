@@ -6,9 +6,7 @@
 #   .\set_creds_author.ps1 -List
 #   .\set_creds_author.ps1                    # interactive menu
 #
-# Location: local run\local setup\
-# One-click shortcuts (optional):
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\set_creds_author.ps1 -AuthorId 180951488
+# Location: local_run\local_setup\
 
 param(
     [string] $HomeDirectory = $(if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'P:\all_scripts\oyf_scrape' }),
@@ -26,14 +24,14 @@ if (-not $CredsPath) {
 }
 
 function Test-CredsEnvLineCommented {
-    param([Parameter(Mandatory)][string] $Line)
+    param([string] $Line)
 
     $trimmed = $Line.TrimStart()
     return $trimmed.StartsWith('#') -or $trimmed.StartsWith('//')
 }
 
 function Get-CredsEnvLineBody {
-    param([Parameter(Mandatory)][string] $Line)
+    param([string] $Line)
 
     $trimmed = $Line.Trim()
     if ($trimmed -match '^(#|//)\s*(.+)$') {
@@ -52,7 +50,7 @@ function Get-CredsEnvLineBody {
 }
 
 function Get-CredsEnvKeyValue {
-    param([Parameter(Mandatory)][string] $Line)
+    param([string] $Line)
 
     $parsed = Get-CredsEnvLineBody -Line $Line
     if ($parsed.Body -notmatch '^\s*([^=]+?)\s*=\s*(.*)$') {
@@ -69,7 +67,7 @@ function Get-CredsEnvKeyValue {
 }
 
 function Get-AuthorIdFromChatThread {
-    param([Parameter(Mandatory)][string] $ChatThreadUrl)
+    param([string] $ChatThreadUrl)
 
     if ($ChatThreadUrl -match '/chat/(\d+)') {
         return $Matches[1]
@@ -80,8 +78,8 @@ function Get-AuthorIdFromChatThread {
 
 function Set-CredsEnvLineActive {
     param(
-        [Parameter(Mandatory)][string] $Line,
-        [Parameter(Mandatory)][bool] $Active,
+        [string] $Line,
+        [bool] $Active,
         [string] $CommentStyle = '#'
     )
 
@@ -102,24 +100,28 @@ function Set-CredsEnvLineActive {
 }
 
 function Get-AuthorPairsFromCredsEnv {
-    param([Parameter(Mandatory)][string[]] $Lines)
+    param([string[]] $Rows)
+
+    if (-not $Rows -or $Rows.Count -eq 0) {
+        throw 'Get-AuthorPairsFromCredsEnv requires at least one creds.env line.'
+    }
 
     $pairs = @()
-    for ($i = 0; $i -lt $Lines.Count; $i++) {
-        $chatKv = Get-CredsEnvKeyValue -Line $Lines[$i]
+    for ($i = 0; $i -lt $Rows.Count; $i++) {
+        $chatKv = Get-CredsEnvKeyValue -Line $Rows[$i]
         if (-not $chatKv -or $chatKv.Key -ne 'chat_thread') {
             continue
         }
 
         $j = $i + 1
-        while ($j -lt $Lines.Count -and $Lines[$j].Trim() -eq '') {
+        while ($j -lt $Rows.Count -and $Rows[$j].Trim() -eq '') {
             $j++
         }
-        if ($j -ge $Lines.Count) {
+        if ($j -ge $Rows.Count) {
             throw "chat_thread on line $($i + 1) is not followed by wall_profile."
         }
 
-        $wallKv = Get-CredsEnvKeyValue -Line $Lines[$j]
+        $wallKv = Get-CredsEnvKeyValue -Line $Rows[$j]
         if (-not $wallKv -or $wallKv.Key -ne 'wall_profile') {
             throw "Expected wall_profile after chat_thread on line $($i + 1); got line $($j + 1)."
         }
@@ -142,8 +144,8 @@ if (-not (Test-Path -LiteralPath $CredsPath)) {
     throw "creds.env not found: $CredsPath"
 }
 
-$lines = Get-Content -LiteralPath $CredsPath
-$pairs = Get-AuthorPairsFromCredsEnv -Lines $lines
+$envLines = @(Get-Content -LiteralPath $CredsPath)
+$pairs = Get-AuthorPairsFromCredsEnv -Rows $envLines
 
 if ($pairs.Count -eq 0) {
     throw "No chat_thread / wall_profile author pairs found in $CredsPath"
@@ -190,11 +192,11 @@ if ($target.IsActive -and (@($pairs | Where-Object { $_.IsActive })).Count -eq 1
     return
 }
 
-$updated = $lines.Clone()
+$updated = $envLines.Clone()
 foreach ($pair in $pairs) {
     $makeActive = $pair.AuthorId -eq $AuthorId
-    $updated[$pair.ChatLineIndex] = Set-CredsEnvLineActive -Line $lines[$pair.ChatLineIndex] -Active $makeActive -CommentStyle $pair.CommentStyle
-    $updated[$pair.WallLineIndex] = Set-CredsEnvLineActive -Line $lines[$pair.WallLineIndex] -Active $makeActive -CommentStyle $pair.CommentStyle
+    $updated[$pair.ChatLineIndex] = Set-CredsEnvLineActive -Line $envLines[$pair.ChatLineIndex] -Active $makeActive -CommentStyle $pair.CommentStyle
+    $updated[$pair.WallLineIndex] = Set-CredsEnvLineActive -Line $envLines[$pair.WallLineIndex] -Active $makeActive -CommentStyle $pair.CommentStyle
 }
 
 Write-Host "creds.env: $CredsPath"

@@ -21,8 +21,8 @@ sql_script/media_origin_date_tracker_multi_author.sql  →  approx wall-post ori
 | `data/web.db` | DuckDB database (staging + dimension tables) |
 | `data/creds.env` | Credentials, `chat_thread`, `wall_profile`, `of_web` (one author at a time) |
 | `data/testChromeSession/` | Persistent Chrome profile (cookies / session) |
-| `local run/` | One-click scrape launchers (`scrape_*.ps1`) |
-| `local run/local setup/` | Author switchers (`set_creds_author*.ps1`) |
+| `local_run/` | One-click scrape launchers (`scrape_*.ps1`) |
+| `local_run/local_setup/` | Author switchers (`set_creds_author*.ps1`) |
 | `sql_script/` | Ad-hoc DuckDB analysis scripts + media-origin trackers |
 | `data/scripts/` | `compact_web_db` / `analyze_web_db` maintenance |
 | `dbt/webDataELT/` | dbt models for media dimension ELT |
@@ -91,22 +91,22 @@ Control which creator is scraped by setting the active `chat_thread` and `wall_p
 
 **Comment lines:** `web_scrape.js` uses `loadCredsEnv()` which skips blank lines and lines starting with `#` or `//` before parsing. Comment out inactive authors with `//` (or `#`) so only the active URLs are loaded into `process.env`.
 
-**Switch author (one-click):** `local run/local setup/set_creds_author.ps1` uncomments the matching `chat_thread` + `wall_profile` pair for an `author_id` and comments out all other author pairs. Writes `data/creds.env.bak` before updating.
+**Switch author (one-click):** `local_run/local_setup/set_creds_author.ps1` uncomments the matching `chat_thread` + `wall_profile` pair for an `author_id` and comments out all other author pairs. Writes `data/creds.env.bak` before updating.
 
-Scripts live under `local run/local setup/`.
+Scripts live under `local_run/local_setup/`.
 
 ```powershell
-& '.\local run\local setup\set_creds_author.ps1' -List
-& '.\local run\local setup\set_creds_author.ps1' -AuthorId 180951488
-& '.\local run\local setup\set_creds_author.ps1'                    # interactive menu
+& '.\local_run\local_setup\set_creds_author.ps1' -List
+& '.\local_run\local_setup\set_creds_author.ps1' -AuthorId 180951488
+& '.\local_run\local_setup\set_creds_author.ps1'                    # interactive menu
 ```
 
 **One-click per author:**
 
 | Shortcut | Author |
 |----------|--------|
-| `local run/local setup/set_creds_author_180951488.ps1` | `180951488` |
-| `local run/local setup/set_creds_author_253745725.ps1` | `253745725` |
+| `local_run/local_setup/set_creds_author_180951488.ps1` | `180951488` |
+| `local_run/local_setup/set_creds_author_253745725.ps1` | `253745725` |
 
 Add another author by copying a pair in `creds.env`, then copying an existing `set_creds_author_<author_id>.ps1` (filename = author_id) and updating `-AuthorId` inside.
 
@@ -166,11 +166,11 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_u
 
 | Launcher | Runs |
 |----------|------|
-| `local run/scrape_chat.ps1` | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
-| `local run/scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
-| `local run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
-| `local run/local setup/set_creds_author.ps1` | Activate one author in `data/creds.env` (`chat_thread` + `wall_profile` pair) |
-| `local run/local setup/set_creds_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
+| `local_run/scrape_chat.ps1` | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
+| `local_run/scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
+| `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
+| `local_run/local_setup/set_creds_author.ps1` | Activate one author in `data/creds.env` (`chat_thread` + `wall_profile` pair) |
+| `local_run/local_setup/set_creds_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
 | `data/scripts/compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
 
 Run **one mode per invocation** for CLI scrapes — chat, wall, and purchases are separate processes.
@@ -222,7 +222,7 @@ await du.mediaIds(20)
 await du.run()             // full scrapeChatUnlocks() in one call
 ```
 
-**One-shot:** `& '.\local run\scrape_purchases.ps1'` or `node node_script/web_scrape.js purchases`  
+**One-shot:** `& '.\local_run\scrape_purchases.ps1'` or `node node_script/web_scrape.js purchases`  
 **Artifacts:** `data/api_out.json` (last batch), `logs/scrape_purchases_*.log` (PS1 tee), `logs/error_log_*.log`
 
 **creds.env**
@@ -386,7 +386,7 @@ Run compaction when the scraper and DuckDB CLI are **not** holding a write lock:
 
 Logs to `logs/compact_web_db_*.log`. Override data root with `$env:WEB_SCRAPE_HOME` (same as scrape scripts).
 
-**When to run:** once after upgrading from pre–nav-v31 history bloat (~600 MB → ~55 MB typical); then optionally after chat scrapes that pruned, or weekly if `web.db` grows on `P:` sync. `VACUUM` on a cloud/network drive can take minutes — not chained into `local run/scrape_chat.ps1` by default.
+**When to run:** once after upgrading from pre–nav-v31 history bloat (~600 MB → ~55 MB typical); then optionally after chat scrapes that pruned, or weekly if `web.db` grows on `P:` sync. `VACUUM` on a cloud/network drive can take minutes — not chained into `local_run/scrape_chat.ps1` by default.
 
 Direct Node usage:
 
@@ -463,14 +463,15 @@ web_scrape/
     web_scrape_repl.js                 # interactive REPL
     package.json                       # node deps manifest (installed locally; see Setup)
     package-lock.json
-  local run/
+  local_run/
     scrape_chat.ps1
     scrape_wall.ps1
     scrape_purchases.ps1
-    local setup/
+    local_setup/
       set_creds_author.ps1             # switch active author in creds.env
       set_creds_author_180951488.ps1   # one-click activate author_id 180951488
       set_creds_author_253745725.ps1   # one-click activate author_id 253745725
+      set_creds_author_24569249.ps1   # one-click activate author_id 24569249
   data/scripts/
     compact_web_db.ps1                 # CHECKPOINT + VACUUM web.db
     compact_web_db.js
