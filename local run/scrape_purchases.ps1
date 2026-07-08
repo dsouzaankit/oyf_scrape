@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-Set-Location $PSScriptRoot
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $RepoRoot
 $HomeDirectory = if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'P:\all_scripts\oyf_scrape' }
 # node_modules lives on a local disk (pCloud/network drives lock/slow it); expose it to node via NODE_PATH.
 $DepsHome = if ($env:WEB_SCRAPE_NODE_HOME) { $env:WEB_SCRAPE_NODE_HOME } else { Join-Path $env:LOCALAPPDATA 'oyf_scrape' }
@@ -40,7 +41,7 @@ function Invoke-NodeScrape {
 $exitCode = 0
 $scrapeFailed = $false
 try {
-    $exitCode = Invoke-NodeScrape -NodeArgs @((Join-Path $PSScriptRoot 'node_script\web_scrape.js'), 'purchases') -LogPath $LogPath
+    $exitCode = Invoke-NodeScrape -NodeArgs @((Join-Path $RepoRoot 'node_script\web_scrape.js'), 'purchases') -LogPath $LogPath
     Add-Content -LiteralPath $LogPath -Value "`nfinished: $(Get-Date -Format o)`nexit: $exitCode" -Encoding utf8
     if ($exitCode -ne 0) {
         Write-Host "Scrape failed (exit $exitCode). Skipping media origin tracker."

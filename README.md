@@ -21,7 +21,10 @@ sql_script/media_origin_date_tracker_multi_author.sql  →  approx wall-post ori
 | `data/web.db` | DuckDB database (staging + dimension tables) |
 | `data/creds.env` | Credentials, `chat_thread`, `wall_profile`, `of_web` (one author at a time) |
 | `data/testChromeSession/` | Persistent Chrome profile (cookies / session) |
-| `sql_script/` | Ad-hoc DuckDB analysis scripts |
+| `local run/` | One-click scrape launchers (`scrape_*.ps1`) |
+| `local run/local setup/` | Author switchers (`set_creds_author*.ps1`) |
+| `sql_script/` | Ad-hoc DuckDB analysis scripts + media-origin trackers |
+| `data/scripts/` | `compact_web_db` / `analyze_web_db` maintenance |
 | `dbt/webDataELT/` | dbt models for media dimension ELT |
 
 Data root defaults to `P:\all_scripts\oyf_scrape` (set in `web_scrape.js` as `homeDirectory`). Scripts and scrapers can run from this repo while data lives on that path.
@@ -88,6 +91,25 @@ Control which creator is scraped by setting the active `chat_thread` and `wall_p
 
 **Comment lines:** `web_scrape.js` uses `loadCredsEnv()` which skips blank lines and lines starting with `#` or `//` before parsing. Comment out inactive authors with `//` (or `#`) so only the active URLs are loaded into `process.env`.
 
+**Switch author (one-click):** `local run/local setup/set_creds_author.ps1` uncomments the matching `chat_thread` + `wall_profile` pair for an `author_id` and comments out all other author pairs. Writes `data/creds.env.bak` before updating.
+
+Scripts live under `local run/local setup/`.
+
+```powershell
+& '.\local run\local setup\set_creds_author.ps1' -List
+& '.\local run\local setup\set_creds_author.ps1' -AuthorId 180951488
+& '.\local run\local setup\set_creds_author.ps1'                    # interactive menu
+```
+
+**One-click per author:**
+
+| Shortcut | Author |
+|----------|--------|
+| `local run/local setup/set_creds_author_180951488.ps1` | `180951488` |
+| `local run/local setup/set_creds_author_253745725.ps1` | `253745725` |
+
+Add another author by copying a pair in `creds.env`, then copying an existing `set_creds_author_<author_id>.ps1` (filename = author_id) and updating `-AuthorId` inside.
+
 The numeric segment in `chat_thread` (`/chat/<author_id>`) is also used by the media-origin reporting scripts to filter results.
 
 ### 4. Initialize DuckDB tables
@@ -144,10 +166,12 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_u
 
 | Launcher | Runs |
 |----------|------|
-| `scrape_chat.ps1` | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
-| `scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
-| `scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
-| `compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
+| `local run/scrape_chat.ps1` | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
+| `local run/scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
+| `local run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
+| `local run/local setup/set_creds_author.ps1` | Activate one author in `data/creds.env` (`chat_thread` + `wall_profile` pair) |
+| `local run/local setup/set_creds_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
+| `data/scripts/compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
 
 Run **one mode per invocation** for CLI scrapes — chat, wall, and purchases are separate processes.
 
@@ -198,7 +222,7 @@ await du.mediaIds(20)
 await du.run()             // full scrapeChatUnlocks() in one call
 ```
 
-**One-shot:** `.\scrape_purchases.ps1` or `node node_script/web_scrape.js purchases`  
+**One-shot:** `& '.\local run\scrape_purchases.ps1'` or `node node_script/web_scrape.js purchases`  
 **Artifacts:** `data/api_out.json` (last batch), `logs/scrape_purchases_*.log` (PS1 tee), `logs/error_log_*.log`
 
 **creds.env**
@@ -291,16 +315,16 @@ Built-in optional filters (edit CTEs in the SQL file, or let PS1 inject values):
 
 | Script | Description |
 |--------|-------------|
-| `run_media_origin_tracker.ps1` | Single run; optional `-OriginDaysLast N` |
-| `run_media_origin_tracker_by_days.ps1` | Runs for **30, 60, 90, 180, 365** days (override with `-Days`) |
+| `sql_script/run_media_origin_tracker.ps1` | Single run; optional `-OriginDaysLast N` |
+| `sql_script/run_media_origin_tracker_by_days.ps1` | Runs for **30, 60, 90, 180, 365** days (override with `-Days`) |
 
 ```powershell
-.\run_media_origin_tracker.ps1
-.\run_media_origin_tracker.ps1 -OriginDaysLast 90
-.\run_media_origin_tracker.ps1 -AuthorId 180951488
+.\sql_script\run_media_origin_tracker.ps1
+.\sql_script\run_media_origin_tracker.ps1 -OriginDaysLast 90
+.\sql_script\run_media_origin_tracker.ps1 -AuthorId 180951488
 
-.\run_media_origin_tracker_by_days.ps1
-.\run_media_origin_tracker_by_days.ps1 -Days 30,90
+.\sql_script\run_media_origin_tracker_by_days.ps1
+.\sql_script\run_media_origin_tracker_by_days.ps1 -Days 30,90
 ```
 
 Both scripts:
@@ -357,17 +381,17 @@ Chat scrape **prune** deletes old `media_dim_history` rows frequently, but DuckD
 Run compaction when the scraper and DuckDB CLI are **not** holding a write lock:
 
 ```powershell
-.\compact_web_db.ps1
+.\data\scripts\compact_web_db.ps1
 ```
 
 Logs to `logs/compact_web_db_*.log`. Override data root with `$env:WEB_SCRAPE_HOME` (same as scrape scripts).
 
-**When to run:** once after upgrading from pre–nav-v31 history bloat (~600 MB → ~55 MB typical); then optionally after chat scrapes that pruned, or weekly if `web.db` grows on `P:` sync. `VACUUM` on a cloud/network drive can take minutes — not chained into `scrape_chat.ps1` by default.
+**When to run:** once after upgrading from pre–nav-v31 history bloat (~600 MB → ~55 MB typical); then optionally after chat scrapes that pruned, or weekly if `web.db` grows on `P:` sync. `VACUUM` on a cloud/network drive can take minutes — not chained into `local run/scrape_chat.ps1` by default.
 
 Direct Node usage:
 
 ```powershell
-node compact_web_db.js P:\all_scripts\oyf_scrape\data\web.db
+node .\data\scripts\compact_web_db.js P:\all_scripts\oyf_scrape\data\web.db
 ```
 
 ### Inspect size and row counts (read-only)
@@ -375,9 +399,9 @@ node compact_web_db.js P:\all_scripts\oyf_scrape\data\web.db
 `analyze_web_db.js` reports file/WAL size, table row counts, `media_dim_history` runs, approximate JSON payload sizes, and `PRAGMA database_size`. Opens **read-only** — safe while the scraper is running.
 
 ```powershell
-node analyze_web_db.js
-node analyze_web_db.js P:\all_scripts\oyf_scrape\data\web.db
-node analyze_web_db.js --deep
+node .\data\scripts\analyze_web_db.js
+node .\data\scripts\analyze_web_db.js P:\all_scripts\oyf_scrape\data\web.db
+node .\data\scripts\analyze_web_db.js --deep
 ```
 
 `--deep` adds per-column size estimates and `pragma_storage_info` segment dumps (useful when the file is large but `COUNT(*)` is small — dead blocks from prune `DELETE`s).
@@ -426,7 +450,7 @@ WHERE json_extract_string(cm.fromUser, '$.id') = '253745725'
 | Chromium disconnects on `Opening chat thread:` | **nav-v49+** — stealth on by default, `--disable-gpu` on Windows, warm-up + retry nav. Log: `nav-v49`, `Puppeteer ready (stealth)`. Set `puppeteer_stealth=0` only for debugging |
 | `TimeoutError: Timed out after waiting` at launch | **nav-v47+** kills zombie Chromium after each failed attempt. Close stuck Puppeteer windows; log should show `Chromium executable: ...\.cache\puppeteer\...` |
 | Page loads only after focusing/restoring Chromium | Chromium throttles background/occluded windows on Windows. Script uses anti-throttle launch flags and one-time `focusScrapeWindow()` before initial login |
-| `web.db` huge but `COUNT(*)` on `media_dim_history` is small | Prune `DELETE`s are logical only; run `.\compact_web_db.ps1` with scraper/CLI stopped. Run `node analyze_web_db.js --deep` to compare logical row counts vs on-disk segments. Copying `web.db` without its `.wal` can show stale row counts until checkpointed |
+| `web.db` huge but `COUNT(*)` on `media_dim_history` is small | Prune `DELETE`s are logical only; run `.\data\scripts\compact_web_db.ps1` with scraper/CLI stopped. Run `node .\data\scripts\analyze_web_db.js --deep` to compare logical row counts vs on-disk segments. Copying `web.db` without its `.wal` can show stale row counts until checkpointed |
 
 Errors are also written to `logs/error_log_<timestamp>.log`.
 
@@ -439,14 +463,23 @@ web_scrape/
     web_scrape_repl.js                 # interactive REPL
     package.json                       # node deps manifest (installed locally; see Setup)
     package-lock.json
-  scrape_chat.ps1
-  scrape_wall.ps1
-  scrape_purchases.ps1
-  compact_web_db.ps1                   # CHECKPOINT + VACUUM web.db
-  compact_web_db.js
-  analyze_web_db.js                    # read-only size/row-count report (--deep for storage segments)
-  run_media_origin_tracker.ps1         # single media-origin report
-  run_media_origin_tracker_by_days.ps1 # report for 30/60/90/180/365-day windows
+  local run/
+    scrape_chat.ps1
+    scrape_wall.ps1
+    scrape_purchases.ps1
+    local setup/
+      set_creds_author.ps1             # switch active author in creds.env
+      set_creds_author_180951488.ps1   # one-click activate author_id 180951488
+      set_creds_author_253745725.ps1   # one-click activate author_id 253745725
+  data/scripts/
+    compact_web_db.ps1                 # CHECKPOINT + VACUUM web.db
+    compact_web_db.js
+    analyze_web_db.ps1
+    analyze_web_db.js                  # read-only size/row-count report (--deep for storage segments)
+  sql_script/
+    run_media_origin_tracker.ps1       # single media-origin report
+    run_media_origin_tracker_by_days.ps1  # report for 30/60/90/180/365-day windows
+    media_origin_date_tracker_multi_author.sql
   dbt/
     profiles.example.yml
     webDataELT/
