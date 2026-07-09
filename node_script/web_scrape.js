@@ -2529,6 +2529,11 @@ function normalizeScrapeRowId(id) {
     return digits || null;
 }
 
+function seenIdsToArray(seenIds) {
+    if (!seenIds) return [];
+    return seenIds instanceof Set ? [...seenIds] : [...seenIds];
+}
+
 function collectChatMessageIds(list) {
     const ids = [];
     for (const msg of list || []) {
@@ -2564,7 +2569,7 @@ async function ensureScrapeExpiredColumns() {
 }
 
 function buildSeenIdsSubquerySql(ids) {
-    const safeIds = [...new Set((ids || []).map(normalizeScrapeRowId).filter(Boolean))];
+    const safeIds = [...new Set(seenIdsToArray(ids).map(normalizeScrapeRowId).filter(Boolean))];
     if (!safeIds.length) {
         return 'SELECT CAST(NULL AS BIGINT) AS id WHERE false';
     }
@@ -2572,7 +2577,7 @@ function buildSeenIdsSubquerySql(ids) {
 }
 
 async function markScrapeIdsActive(tableName, ids) {
-    const safeIds = [...new Set((ids || []).map(normalizeScrapeRowId).filter(Boolean))];
+    const safeIds = [...new Set(seenIdsToArray(ids).map(normalizeScrapeRowId).filter(Boolean))];
     if (!safeIds.length) return 0;
     const connection = await instance.connect();
     try {
@@ -2607,7 +2612,7 @@ async function expireUnseenScrapeRows({
 }) {
     const safeAuthorId = normalizeScrapeRowId(authorId);
     if (!safeAuthorId) return { expired: 0, revived: 0 };
-    const safeSeenIds = [...new Set((seenIds || []).map(normalizeScrapeRowId).filter(Boolean))];
+    const safeSeenIds = [...new Set(seenIdsToArray(seenIds).map(normalizeScrapeRowId).filter(Boolean))];
     const runTsSql = jsDateToSqlDatetime(runDatetime);
     const windowTs = new Date(windowStartMs).toISOString().replace('T', ' ').replace('Z', '');
     const seenSql = buildSeenIdsSubquerySql(safeSeenIds);
