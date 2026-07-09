@@ -1,4 +1,4 @@
-# One-click: activate author_id 253745725 in data/creds.env
+# One-click: activate author_id 253745725 in data/config.env
 # From repo root: & '.\local_run\local_setup\set_creds_author_253745725.ps1'
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot

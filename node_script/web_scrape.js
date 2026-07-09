@@ -1,4 +1,4 @@
-// control author selection via creds.env (one at a time)!
+// control author selection via config.env (one at a time)!
 // run one scrape mode per invocation: node web_scrape.js chat | wall | purchases
 // interactive REPL: node web_scrape_repl.js  (or WEB_SCRAPE_REPL=1 / --repl)
 // this is scd type 4 => scd type 2 + history dim table
@@ -543,11 +543,11 @@ async function launchAndConnectBrowser(puppeteer, userDataDir, launchOptions) {
 
 const urlCache = new Map();
 homeDirectory = (process.env.WEB_SCRAPE_HOME || 'P:\\all_scripts\\oyf_scrape').replace(/\//g, '\\');
-credsPath = path.join(homeDirectory, 'data', 'creds.env');
+configPath = path.join(homeDirectory, 'data', 'config.env');
 
-function loadCredsEnv(filePath) {
-    const credsText = fs.readFileSync(filePath, 'utf8');
-    const activeLines = credsText
+function loadConfigEnv(filePath) {
+    const configText = fs.readFileSync(filePath, 'utf8');
+    const activeLines = configText
         .split(/\r?\n/)
         .filter(line => {
             const trimmed = line.trim();
@@ -560,7 +560,7 @@ function loadCredsEnv(filePath) {
     }
 }
 
-loadCredsEnv(credsPath);
+loadConfigEnv(configPath);
 initPuppeteerLauncher();
 browserLaunchOptions = buildBrowserLaunchOptions();
 
@@ -796,7 +796,7 @@ let chromeProfileLocalDir = null;
 let chromeProfileRemoteDir = null;
 let browserStateDataFolder = resolveBrowserStateDataFolder();
 
-// Derive the oyf site base URL (protocol+host) from creds.env. Prefer of_web, then
+// Derive the oyf site base URL (protocol+host) from config.env. Prefer of_web, then
 // fall back to other configured URLs so chat/wall modes work when of_web is unset.
 function getOyfBaseUrl() {
     for (const raw of [process.env.of_web, process.env.chat_thread, process.env.wall_profile, process.env.purchases_page]) {
@@ -861,7 +861,7 @@ function getPurchasesPageUrl() {
     }
     const wall = (process.env.wall_profile || '').trim().replace(/\/$/, '');
     if (wall) return wall;
-    throw new Error('Set of_web or purchases_page in creds.env for purchases scrape.');
+    throw new Error('Set of_web or purchases_page in config.env for purchases scrape.');
 }
 
 function getPurchasesEnvHint() {
@@ -880,7 +880,7 @@ function getMediaDimHistoryRetainRuns() {
 function validateCredsAtStartup() {
     process.env.chat_thread = (process.env.chat_thread || '').trim();
     if (!process.env.chat_thread) {
-        console.error('chat_thread is required in creds.env (used for login in all scrape modes)');
+        console.error('chat_thread is required in config.env (used for login in all scrape modes)');
         process.exit(1);
     }
     if (isOyfHomeUrl(process.env.chat_thread)) {
@@ -910,11 +910,11 @@ function validateCredsAtStartup() {
         process.env.of_web = process.env.of_web.trim();
     }
     if (scrapeMode === 'wall' && !(process.env.wall_profile || '').trim()) {
-        console.error('wall_profile is required in creds.env for wall scrape');
+        console.error('wall_profile is required in config.env for wall scrape');
         process.exit(1);
     }
     if (scrapeMode === 'purchases' && !(process.env.of_web || '').trim() && !(process.env.purchases_page || '').trim()) {
-        console.error('of_web or purchases_page is required in creds.env for purchases scrape');
+        console.error('of_web or purchases_page is required in config.env for purchases scrape');
         process.exit(1);
     }
     if (scrapeMode === 'purchases') {
@@ -1074,6 +1074,19 @@ async function recoverBrowserConnection() {
 function isConnectionLostError(err) {
     const msg = String(err?.message || err);
     return /Connection closed|Target closed|Protocol error.*(Target|Connection)|Browser has disconnected/i.test(msg);
+}
+
+function logResponseParseError(error) {
+    if (!isTransientPageError(error) && !isConnectionLostError(error)) {
+        console.error('Error parsing JSON from response:', error);
+    }
+}
+
+async function waitInFlightHandlers(getCount, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    while (getCount() > 0 && Date.now() < deadline) {
+        await sleepMs(25);
+    }
 }
 
 async function pickScrapePageForUrl(targetUrl) {
@@ -2397,6 +2410,15 @@ function getWallScrapeMinPostedAtMs() {
     return Date.now() - days * 86400000;
 }
 
+function isTruthyCredsEnv(value) {
+    const v = String(value ?? '').trim().toLowerCase();
+    return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+function isWallScrapeForceBackfillEnabled() {
+    return isTruthyCredsEnv(process.env.wall_scrape_force_backfill);
+}
+
 function filterWallPostsByMinPostedAt(list, minPostedAtMs) {
     if (minPostedAtMs == null || !list?.length) return list || [];
     return list.filter((post) => {
@@ -3038,12 +3060,14 @@ async function scrapeChatMessages() {
         }
     }
 
+    let chatResponsesInFlight = 0;
     const onChatResponse = async (response) => {
         // Message pages only — other /chats/ XHRs have no list and must be ignored.
         const url = response.url();
         if (!url.includes('api2/v2/chats/') || !url.includes('/messages')) {
             return;
         }
+        chatResponsesInFlight += 1;
         try {
             const jsonResponse = await response.json();
             const list = jsonResponse && jsonResponse.list;
@@ -3069,7 +3093,9 @@ async function scrapeChatMessages() {
                 evaluateChatBatchStop(jsonResponse, trimmed, insertCount);
             });
         } catch (error) {
-            console.error('Error parsing JSON from response:', error);
+            logResponseParseError(error);
+        } finally {
+            chatResponsesInFlight -= 1;
         }
     };
 
@@ -3109,6 +3135,7 @@ async function scrapeChatMessages() {
         console.log('Chat messages scrape complete.');
     } finally {
         page.off('response', onChatResponse);
+        await waitInFlightHandlers(() => chatResponsesInFlight);
         await enqueueChatBatch(() => {});
     }
 }
@@ -3121,15 +3148,25 @@ let needToScrollDn = true;
     const authorId = getAuthorIdFromCreds();
     const wallMinPostedAtMs = getWallScrapeMinPostedAtMs();
     const wallMaxAgeDays = process.env.wall_scrape_max_age_days || '730';
+    const wallForceBackfill = isWallScrapeForceBackfillEnabled();
 
     logStep('Reading wall postedAt bounds from DuckDB (before navigation)...');
     console.log(
         `Wall scrape window: postedAt >= ${new Date(wallMinPostedAtMs).toISOString()} ` +
         `(wall_scrape_max_age_days=${wallMaxAgeDays})`
     );
+    if (wallForceBackfill) {
+        console.log(
+            'wall_scrape_force_backfill=1: high-watermark stop disabled; ' +
+            'scrolling until 730-day cutoff or hasMore=false (maiden-style gap backfill).'
+        );
+    }
     const wallBounds = await getWallPostedAtBoundsMs(authorId, wallMinPostedAtMs);
     const wallLowWatermarkMs = wallBounds.minMs;
     const wallHighWatermarkMs = wallBounds.maxMs;
+    const wallStopHint = wallForceBackfill
+        ? 'scroll down until 730-day cutoff or hasMore=false (force backfill)'
+        : 'scroll down until batch is older than DB high watermark with no new rows, 730-day cutoff, or hasMore=false';
     if (wallLowWatermarkMs != null && wallHighWatermarkMs != null) {
         let boundsMsg =
             `Wall DB bounds for ${authorId} (within ${wallMaxAgeDays}-day window): ` +
@@ -3138,7 +3175,7 @@ let needToScrollDn = true;
         if (wallBounds.totalCount > wallBounds.windowCount) {
             boundsMsg += `; ${wallBounds.totalCount} total in DB, oldest abs ${new Date(wallBounds.absMinMs).toISOString()} outside window`;
         }
-        boundsMsg += `] (scroll down until batch is older than DB high watermark with no new rows, 730-day cutoff, or hasMore=false)`;
+        boundsMsg += `] (${wallStopHint})`;
         console.log(boundsMsg);
     } else if (wallBounds.totalCount > 0) {
         console.log(
@@ -3163,6 +3200,7 @@ let needToScrollDn = true;
             );
             needToScrollDn = false;
         } else if (
+            !wallForceBackfill &&
             wallHighWatermarkMs != null &&
             batchMaxMs != null &&
             batchMaxMs < wallHighWatermarkMs &&
@@ -3176,11 +3214,13 @@ let needToScrollDn = true;
         }
     }
 
+    let wallResponsesInFlight = 0;
     const onWallResponse = async (response) => {
         const url = response.url();
         if (!wallPostsApiUrlMatches(url)) return;
-      try {
-        const jsonResponse = await response.json();
+        wallResponsesInFlight += 1;
+        try {
+            const jsonResponse = await response.json();
             enqueueWallBatch(async () => {
                 const trimmed = trimWallPostListForDb(jsonResponse['list'] || []);
                 const { minMs: batchMinMs, maxMs: batchMaxMs } = getBatchMinMaxPostedAtMs(trimmed);
@@ -3207,7 +3247,9 @@ let needToScrollDn = true;
                 evaluateWallBatchStop(jsonResponse, trimmed, list, insertCount);
             });
         } catch (error) {
-            console.error('Error parsing JSON from response:', error);
+            logResponseParseError(error);
+        } finally {
+            wallResponsesInFlight -= 1;
         }
     };
 
@@ -3236,6 +3278,7 @@ let needToScrollDn = true;
         console.log('Wall posts scrape complete.');
     } finally {
         page.off('response', onWallResponse);
+        await waitInFlightHandlers(() => wallResponsesInFlight);
         await enqueueWallBatch(() => {});
     }
 }
@@ -3280,7 +3323,7 @@ async function waitAndClickTab(elementId, labelHint = null) {
     throw new Error(
         `Tab #${id} not found within 90s on ${targetUrl}. ` +
         'While logged in, open that URL in Chrome and check the Purchased tab id (DevTools). ' +
-        'Set purchases_tab_selector / purchases_click_selector in creds.env if needed.'
+        'Set purchases_tab_selector / purchases_click_selector in config.env if needed.'
     );
 }
 
@@ -3313,9 +3356,11 @@ async function scrapeChatUnlocks() {
     const firstPaidChat = new Promise((resolve) => { resolveFirstPaidChat = resolve; });
     const enqueuePurchasesBatch = createBatchQueue();
 
+    let purchasesResponsesInFlight = 0;
     const onPurchasesResponse = async (response) => {
         // Site fires on click (then scroll): /api2/v2/posts/paid/chat?limit=10&skip_users=all&format=infinite&offset=…
         if (response.url().includes('/posts/paid/chat')) {
+            purchasesResponsesInFlight += 1;
             try {
                 sawPaidChat = true;
                 resolveFirstPaidChat();
@@ -3336,10 +3381,12 @@ async function scrapeChatUnlocks() {
                         needToScrollDn = false;
 	    }
                 });
-      } catch (error) {
-        console.error('Error parsing JSON from response:', error);
-      }
-    }
+            } catch (error) {
+                logResponseParseError(error);
+            } finally {
+                purchasesResponsesInFlight -= 1;
+            }
+        }
     };
 
     page.on('response', onPurchasesResponse);
@@ -3354,7 +3401,7 @@ async function scrapeChatUnlocks() {
         await Promise.race([firstPaidChat, sleepMs(20000)]);
         if (!sawPaidChat) {
             throw new Error(
-                'No /posts/paid/chat XHR after click. Set purchases_click_selector in creds.env to the correct control.'
+                'No /posts/paid/chat XHR after click. Set purchases_click_selector in config.env to the correct control.'
             );
         }
 
@@ -3374,6 +3421,7 @@ async function scrapeChatUnlocks() {
         console.log('Chat unlocks (purchases) scrape complete.');
     } finally {
         page.off('response', onPurchasesResponse);
+        await waitInFlightHandlers(() => purchasesResponsesInFlight);
         await enqueuePurchasesBatch(() => {});
     }
 }

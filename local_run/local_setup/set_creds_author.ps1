@@ -1,4 +1,4 @@
-# Activate one author in data/creds.env by uncommenting its chat_thread + wall_profile pair
+# Activate one author in data/config.env by uncommenting its chat_thread + wall_profile pair
 # and commenting out every other author pair.
 #
 # Usage:
@@ -10,7 +10,7 @@
 
 param(
     [string] $HomeDirectory = $(if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'P:\all_scripts\oyf_scrape' }),
-    [string] $CredsPath,
+    [string] $configPath,
     [string] $AuthorId,
     [switch] $List,
     [switch] $WhatIf
@@ -19,8 +19,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if (-not $CredsPath) {
-    $CredsPath = Join-Path $HomeDirectory 'data\creds.env'
+if (-not $configPath) {
+    $configPath = Join-Path $HomeDirectory 'data\config.env'
 }
 
 function Test-CredsEnvLineCommented {
@@ -99,11 +99,11 @@ function Set-CredsEnvLineActive {
     return "# $($parsed.Body)"
 }
 
-function Get-AuthorPairsFromCredsEnv {
+function Get-AuthorPairsFromConfigEnv {
     param([string[]] $Rows)
 
     if (-not $Rows -or $Rows.Count -eq 0) {
-        throw 'Get-AuthorPairsFromCredsEnv requires at least one creds.env line.'
+        throw 'Get-AuthorPairsFromConfigEnv requires at least one config.env line.'
     }
 
     $pairs = @()
@@ -140,19 +140,19 @@ function Get-AuthorPairsFromCredsEnv {
     return $pairs
 }
 
-if (-not (Test-Path -LiteralPath $CredsPath)) {
-    throw "creds.env not found: $CredsPath"
+if (-not (Test-Path -LiteralPath $configPath)) {
+    throw "config.env not found: $configPath"
 }
 
-$envLines = @(Get-Content -LiteralPath $CredsPath)
-$pairs = Get-AuthorPairsFromCredsEnv -Rows $envLines
+$envLines = @(Get-Content -LiteralPath $configPath)
+$pairs = Get-AuthorPairsFromConfigEnv -Rows $envLines
 
 if ($pairs.Count -eq 0) {
-    throw "No chat_thread / wall_profile author pairs found in $CredsPath"
+    throw "No chat_thread / wall_profile author pairs found in $configPath"
 }
 
 if ($List) {
-    Write-Host "creds.env: $CredsPath"
+    Write-Host "config.env: $configPath"
     foreach ($pair in $pairs) {
         $state = if ($pair.IsActive) { 'active' } else { 'commented' }
         Write-Host ("  {0}  ({1})" -f $pair.AuthorId, $state)
@@ -161,7 +161,7 @@ if ($List) {
 }
 
 if (-not $AuthorId) {
-    Write-Host "creds.env: $CredsPath"
+    Write-Host "config.env: $configPath"
     Write-Host 'Select author_id to activate:'
     for ($n = 0; $n -lt $pairs.Count; $n++) {
         $marker = if ($pairs[$n].IsActive) { '*' } else { ' ' }
@@ -184,11 +184,11 @@ if ($AuthorId -notmatch '^\d+$') {
 $target = $pairs | Where-Object { $_.AuthorId -eq $AuthorId } | Select-Object -First 1
 if (-not $target) {
     $available = ($pairs | ForEach-Object { $_.AuthorId }) -join ', '
-    throw "author_id $AuthorId not found in creds.env. Available: $available"
+    throw "author_id $AuthorId not found in config.env. Available: $available"
 }
 
 if ($target.IsActive -and (@($pairs | Where-Object { $_.IsActive })).Count -eq 1) {
-    Write-Host "author_id $AuthorId is already active in $CredsPath"
+    Write-Host "author_id $AuthorId is already active in $configPath"
     return
 }
 
@@ -199,7 +199,7 @@ foreach ($pair in $pairs) {
     $updated[$pair.WallLineIndex] = Set-CredsEnvLineActive -Line $envLines[$pair.WallLineIndex] -Active $makeActive -CommentStyle $pair.CommentStyle
 }
 
-Write-Host "creds.env: $CredsPath"
+Write-Host "config.env: $configPath"
 Write-Host "active author_id: $AuthorId"
 
 if ($WhatIf) {
@@ -211,7 +211,7 @@ if ($WhatIf) {
     return
 }
 
-$backupPath = "$CredsPath.bak"
-Copy-Item -LiteralPath $CredsPath -Destination $backupPath -Force
-Set-Content -LiteralPath $CredsPath -Value $updated -Encoding utf8
+$backupPath = "$configPath.bak"
+Copy-Item -LiteralPath $configPath -Destination $backupPath -Force
+Set-Content -LiteralPath $configPath -Value $updated -Encoding utf8
 Write-Host "backup:    $backupPath"

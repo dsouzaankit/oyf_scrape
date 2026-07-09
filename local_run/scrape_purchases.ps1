@@ -6,15 +6,15 @@ $HomeDirectory = if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'P:\a
 # node_modules lives on a local disk (pCloud/network drives lock/slow it); expose it to node via NODE_PATH.
 $DepsHome = if ($env:WEB_SCRAPE_NODE_HOME) { $env:WEB_SCRAPE_NODE_HOME } else { Join-Path $env:LOCALAPPDATA 'oyf_scrape' }
 $env:NODE_PATH = Join-Path $DepsHome 'node_modules'
-$CredsPath = Join-Path $HomeDirectory 'data\creds.env'
+$configPath = Join-Path $HomeDirectory 'data\config.env'
 $LogsFolder = Join-Path $HomeDirectory 'logs'
 New-Item -ItemType Directory -Force -Path $LogsFolder | Out-Null
 $LogPath = Join-Path $LogsFolder ("scrape_purchases_{0:yyyyMMddTHHmmss}.log" -f (Get-Date))
 
-Write-Host "creds.env: $CredsPath"
+Write-Host "config.env: $configPath"
 Write-Host "log:       $LogPath"
 @(
-    "creds.env: $CredsPath"
+    "config.env: $configPath"
     "log:       $LogPath"
     "started:   $(Get-Date -Format o)"
     ''

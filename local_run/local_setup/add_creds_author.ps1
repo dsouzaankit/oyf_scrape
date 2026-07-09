@@ -1,4 +1,4 @@
-# Interactively add a chat_thread + wall_profile author pair to creds.env and create
+# Interactively add a chat_thread + wall_profile author pair to config.env and create
 # set_creds_author_<author_id>.ps1 one-click activator.
 #
 # Usage:
@@ -7,7 +7,7 @@
 
 param(
     [string] $HomeDirectory = $(if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'P:\all_scripts\oyf_scrape' }),
-    [string] $CredsPath,
+    [string] $configPath,
     [string] $ChatThread,
     [string] $WallProfile,
     [switch] $Activate,
@@ -18,8 +18,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ScriptDir = $PSScriptRoot
-if (-not $CredsPath) {
-    $CredsPath = Join-Path $HomeDirectory 'data\creds.env'
+if (-not $configPath) {
+    $configPath = Join-Path $HomeDirectory 'data\config.env'
 }
 
 function Get-CredsEnvLineBody {
@@ -60,7 +60,7 @@ function Normalize-UrlInput {
     return $u
 }
 
-function Get-AuthorPairsFromCredsEnv {
+function Get-AuthorPairsFromConfigEnv {
     param([string[]] $Rows)
 
     $pairs = @()
@@ -95,7 +95,7 @@ function Write-AuthorOneClickScript {
 
     $path = Join-Path $TargetDir "set_creds_author_$AuthorId.ps1"
     @"
-# One-click: activate author_id $AuthorId in data/creds.env
+# One-click: activate author_id $AuthorId in data/config.env
 # From repo root: & '.\local_run\local_setup\set_creds_author_$AuthorId.ps1'
 `$ErrorActionPreference = 'Stop'
 Set-Location `$PSScriptRoot
@@ -111,8 +111,8 @@ exit `$code
     return $path
 }
 
-if (-not (Test-Path -LiteralPath $CredsPath)) {
-    throw "creds.env not found: $CredsPath"
+if (-not (Test-Path -LiteralPath $configPath)) {
+    throw "config.env not found: $configPath"
 }
 
 if (-not $ChatThread) {
@@ -130,8 +130,8 @@ if ($AuthorId -notmatch '^\d+$') {
     throw "author_id must be numeric digits, got: $AuthorId"
 }
 
-$envLines = @(Get-Content -LiteralPath $CredsPath)
-$pairs = Get-AuthorPairsFromCredsEnv -Rows $envLines
+$envLines = @(Get-Content -LiteralPath $configPath)
+$pairs = Get-AuthorPairsFromConfigEnv -Rows $envLines
 $existing = $pairs | Where-Object { $_.AuthorId -eq $AuthorId } | Select-Object -First 1
 
 $updated = $envLines.Clone()
@@ -150,7 +150,7 @@ else {
 
 $oneClickPath = Write-AuthorOneClickScript -TargetDir $ScriptDir -AuthorId $AuthorId
 
-Write-Host "creds.env:   $CredsPath"
+Write-Host "config.env:   $configPath"
 Write-Host "author_id:   $AuthorId"
 Write-Host "chat_thread: $ChatThread"
 Write-Host "wall_profile: $WallProfile"
@@ -158,22 +158,22 @@ Write-Host "one-click:   $oneClickPath"
 Write-Host "action:      $action author pair (stored commented)"
 
 if ($WhatIf) {
-    Write-Host 'WhatIf: no creds.env changes written.'
+    Write-Host 'WhatIf: no config.env changes written.'
     return
 }
 
-$backupPath = "$CredsPath.bak"
-Copy-Item -LiteralPath $CredsPath -Destination $backupPath -Force
-Set-Content -LiteralPath $CredsPath -Value $updated -Encoding utf8
+$backupPath = "$configPath.bak"
+Copy-Item -LiteralPath $configPath -Destination $backupPath -Force
+Set-Content -LiteralPath $configPath -Value $updated -Encoding utf8
 Write-Host "backup:      $backupPath"
 
 if ($Activate) {
     Write-Host 'Activating author...'
-    & (Join-Path $ScriptDir 'set_creds_author.ps1') -AuthorId $AuthorId -CredsPath $CredsPath
+    & (Join-Path $ScriptDir 'set_creds_author.ps1') -AuthorId $AuthorId -ConfigPath $configPath
 }
 else {
     $ans = Read-Host 'Activate this author now? [y/N]'
     if ($ans -match '^(y|yes)$') {
-        & (Join-Path $ScriptDir 'set_creds_author.ps1') -AuthorId $AuthorId -CredsPath $CredsPath
+        & (Join-Path $ScriptDir 'set_creds_author.ps1') -AuthorId $AuthorId -ConfigPath $configPath
     }
 }

@@ -189,7 +189,7 @@ async function startWebScrapeRepl() {
     }
 
     console.log(`
-web_scrape REPL ready (creds: ${path.join(ctx.homeDirectory, 'data', 'creds.env')})
+web_scrape REPL ready (creds: ${path.join(ctx.homeDirectory, 'data', 'config.env')})
   help() | du.help()
   await scrapeChatMessages() | scrapeWallPosts() | scrapeChatUnlocks()
 ${unlocksMode ? `  Unlocks: await du.run()

@@ -2,7 +2,7 @@
 node_modules/
 
 # Local secrets and config
-creds.env
+config.env
 *.env
 
 # DuckDB database + write-ahead logs

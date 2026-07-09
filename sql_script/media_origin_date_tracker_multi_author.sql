@@ -1,6 +1,6 @@
 -- Track approximate wall-post origin date for chat media, per author.
 -- Supports multiple author_id values: windows and joins are partitioned by author_id.
--- author name can be tracked from creds.env
+-- author name can be tracked from config.env
 -- Optional author filter: empty list = all authors; add IDs to restrict.
 -- Optional msg text filter: empty list = all messages; add substrings to match (case-insensitive).
 -- Optional media_id filter: empty list = all media; add bigint IDs to restrict.

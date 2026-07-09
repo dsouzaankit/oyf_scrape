@@ -19,7 +19,7 @@ sql_script/media_origin_date_tracker_multi_author.sql  →  approx wall-post ori
 |-----------|------|
 | `web_scrape.js` | Browser scrape + DuckDB load (`chat`, `wall`, or `purchases` mode) |
 | `data/web.db` | DuckDB database (staging + dimension tables) |
-| `data/creds.env` | Credentials, `chat_thread`, `wall_profile`, `of_web` (one author at a time) |
+| `data/config.env` | Credentials, `chat_thread`, `wall_profile`, `of_web` (one author at a time) |
 | `data/testChromeSession/` | Persistent Chrome profile (cookies / session) |
 | `local_run/` | One-click scrape launchers (`scrape_*.ps1`) |
 | `local_run/local_setup/` | Author switchers (`set_creds_author*.ps1`) |
@@ -60,7 +60,7 @@ To use a different location, set `WEB_SCRAPE_NODE_HOME` to the folder that conta
 ```
 {homeDirectory}/          # default: P:\all_scripts\oyf_scrape
   data/
-    creds.env             # secrets + URLs (not committed)
+    config.env             # secrets + URLs (not committed)
     web.db                # DuckDB file
     api_out.json          # latest API batch (overwritten each response)
     testChromeSession/    # Chrome user data dir
@@ -72,7 +72,9 @@ To use a different location, set `WEB_SCRAPE_NODE_HOME` to the folder that conta
 
 Override data root for reporting scripts with `-HomeDirectory` or `$env:WEB_SCRAPE_HOME`.
 
-### 3. Create `data/creds.env`
+### 3. Create `data/config.env`
+
+If you have an existing `data/creds.env`, rename it to `config.env` (same keys and format).
 
 ```env
 of_usern=your_email
@@ -82,6 +84,7 @@ chat_thread=https://...com/my/chats/chat/<author_id>
 wall_profile=https://...com/<creator>
 media_dim_history_retain_runs=5
 wall_scrape_max_age_days=730
+wall_scrape_force_backfill=0
 
 # alternate author (ignored)
 // chat_thread=https://...com/my/chats/chat/<other_author_id>
@@ -90,13 +93,13 @@ wall_scrape_max_age_days=730
 
 Control which creator is scraped by setting the active `chat_thread` and `wall_profile` lines. Run **one author at a time**.
 
-**Comment lines:** `web_scrape.js` uses `loadCredsEnv()` which skips blank lines and lines starting with `#` or `//` before parsing. Comment out inactive authors with `//` (or `#`) so only the active URLs are loaded into `process.env`.
+**Comment lines:** `web_scrape.js` uses `loadConfigEnv()` which skips blank lines and lines starting with `#` or `//` before parsing. Comment out inactive authors with `//` (or `#`) so only the active URLs are loaded into `process.env`.
 
-**Switch author (one-click):** `local_run/local_setup/set_creds_author.ps1` uncomments the matching `chat_thread` + `wall_profile` pair for an `author_id` and comments out all other author pairs. Writes `data/creds.env.bak` before updating.
+**Switch author (one-click):** `local_run/local_setup/set_creds_author.ps1` uncomments the matching `chat_thread` + `wall_profile` pair for an `author_id` and comments out all other author pairs. Writes `data/config.env.bak` before updating.
 
 Scripts live under `local_run/local_setup/`.
 
-**Add author (interactive):** `add_creds_author.ps1` prompts for `chat_thread` and `wall_profile` URLs, appends the pair to `creds.env` (commented), writes `set_creds_author_<author_id>.ps1`, and optionally activates the author.
+**Add author (interactive):** `add_creds_author.ps1` prompts for `chat_thread` and `wall_profile` URLs, appends the pair to `config.env` (commented), writes `set_creds_author_<author_id>.ps1`, and optionally activates the author.
 
 ```powershell
 & '.\local_run\local_setup\add_creds_author.ps1'
@@ -104,6 +107,9 @@ Scripts live under `local_run/local_setup/`.
 & '.\local_run\local_setup\set_creds_author.ps1' -List
 & '.\local_run\local_setup\set_creds_author.ps1' -AuthorId 180951488
 & '.\local_run\local_setup\set_creds_author.ps1'                    # interactive menu
+& '.\local_run\local_setup\set_creds_wall_backfill.ps1' -Enable    # maiden-style wall gap backfill
+& '.\local_run\local_setup\set_creds_wall_backfill.ps1' -Disable   # default incremental wall stop
+& '.\local_run\local_setup\set_creds_wall_backfill.ps1' -Status
 ```
 
 **One-click per author:**
@@ -175,7 +181,8 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_u
 | `local_run/scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
 | `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
 | `local_run/local_setup/add_creds_author.ps1` | Interactive add author URLs + create `set_creds_author_<author_id>.ps1` |
-| `local_run/local_setup/set_creds_author.ps1` | Activate one author in `data/creds.env` (`chat_thread` + `wall_profile` pair) |
+| `local_run/local_setup/set_creds_author.ps1` | Activate one author in `data/config.env` (`chat_thread` + `wall_profile` pair) |
+| `local_run/local_setup/set_creds_wall_backfill.ps1` | Toggle `wall_scrape_force_backfill` (disable high-watermark stop for gap backfill) |
 | `local_run/local_setup/set_creds_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
 | `data/scripts/compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
 | `sql_script/open_web_db.ps1` | DuckDB CLI: attach `data/web.db` as schema `web` (write when possible; `-ReadOnly` to force) |
@@ -232,7 +239,7 @@ await du.run()             // full scrapeChatUnlocks() in one call
 **One-shot:** `& '.\local_run\scrape_purchases.ps1'` or `node node_script/web_scrape.js purchases`  
 **Artifacts:** `data/api_out.json` (last batch), `logs/scrape_purchases_*.log` (PS1 tee), `logs/error_log_*.log`
 
-**creds.env**
+**config.env**
 
 | Key | Role |
 |-----|------|
@@ -241,7 +248,7 @@ await du.run()             // full scrapeChatUnlocks() in one call
 | `purchases_tab_selector` | Optional; default `#Purchased` (first click) |
 | `purchases_click_selector` | Optional; default `#purchased-chat` (Messages; second click) |
 
-If a click misses, set the matching selector in `creds.env` to the live CSS id/class.
+If a click misses, set the matching selector in `config.env` to the live CSS id/class.
 
 ### Per-run flow
 
@@ -270,7 +277,7 @@ Entry point is `async function main()` so CommonJS `require()` works with async 
 
 - Non-headless by default (`headless: false`).
 - Do not **minimize** the window during scrape. If the Chromium window is behind other apps or minimized, loading can stall — mostly **Chromium background/occlusion throttling** on Windows, not the site blocking automation. Launch flags mitigate this (anti-throttle flags).
-- **`focusScrapeWindow()`** — Win32 foreground **once per Chromium launch**, **after** initial chat navigation lands (for captcha). Budget: `scrape_os_focus_budget` in `creds.env` (default **1**; set **0** to disable OS focus).
+- **`focusScrapeWindow()`** — Win32 foreground **once per Chromium launch**, **after** initial chat navigation lands (for captcha). Budget: `scrape_os_focus_budget` in `config.env` (default **1**; set **0** to disable OS focus).
 - **Login:** two passes (`initial` + `before scrape`). Pass 2 skips re-navigation only when `.b-chats__scrollbar` is visible after pass 1 (log: `Chat UI ready; skipping re-navigation`). Purchases then goes to `of_web` — not back through `wall_profile`.
 - **After login:** chat stays on `chat_thread`; wall → `wall_profile`; purchases → `of_web` / `purchases_page`.
 - Leftmost tab is active.
@@ -279,7 +286,7 @@ Entry point is `async function main()` so CommonJS `require()` works with async 
 
 Persistent profile source: `data/testChromeSession/` on the data root (cookies/session).
 
-**Cloud/network drive (`P:` / pCloud):** Chromium often **crashes on navigation** when the profile lives on a cloud-synced or mapped network drive. The scraper **automatically uses a local copy** at `%LOCALAPPDATA%\web_scrape\testChromeSession` (one-time **auth-only** seed from `P:` — not a full 140MB copy). On shutdown it **syncs session cookies/login back** to `data/testChromeSession/` on `P:` (disable with `sync_chrome_profile_to_p=0`). Override with `chrome_user_data_dir` or `use_local_chrome_profile=0` in `creds.env` to force the remote profile. Set `refresh_local_chrome_profile=1` once to wipe and re-seed the local profile.
+**Cloud/network drive (`P:` / pCloud):** Chromium often **crashes on navigation** when the profile lives on a cloud-synced or mapped network drive. The scraper **automatically uses a local copy** at `%LOCALAPPDATA%\web_scrape\testChromeSession` (one-time **auth-only** seed from `P:` — not a full 140MB copy). On shutdown it **syncs session cookies/login back** to `data/testChromeSession/` on `P:` (disable with `sync_chrome_profile_to_p=0`). Override with `chrome_user_data_dir` or `use_local_chrome_profile=0` in `config.env` to force the remote profile. Set `refresh_local_chrome_profile=1` once to wipe and re-seed the local profile.
 
 **Startup (`launchAndConnectBrowser`):**
 
@@ -312,7 +319,7 @@ Built-in optional filters (edit CTEs in the SQL file, or let PS1 inject values):
 
 | CTE | Purpose |
 |-----|---------|
-| `author_filter` | Restrict to author id(s); PS1 sets from `creds.env` `chat_thread` |
+| `author_filter` | Restrict to author id(s); PS1 sets from `config.env` `chat_thread` |
 | `msg_text_filter` | Substring match on message text |
 | `media_id_filter` | Specific media IDs |
 | `origin_days_filter` | `approx_origin_date` within last N days (`null` = no limit) |
@@ -336,12 +343,12 @@ Built-in optional filters (edit CTEs in the SQL file, or let PS1 inject values):
 
 Both scripts:
 
-- Read `author_id` from `chat_thread` in `creds.env` (unless `-AuthorId` is passed).
+- Read `author_id` from `chat_thread` in `config.env` (unless `-AuthorId` is passed).
 - Open `data/web.db` directly in **read-only** mode (safe while scraper holds a write lock).
 - Substitute `author_filter` and `origin_days_filter` into the SQL template at runtime.
 - Log `last_n_days` to the console (`none` when no day filter is applied; per-window value in the by-days script).
 
-Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-CredsPath`, `-DuckDbExe`, `-Writable`.
+Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-ConfigPath`, `-DuckDbExe`, `-Writable`.
 
 ## Incremental load logic
 
@@ -369,7 +376,10 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-CredsPath`, `-DuckDbE
 
 **Typical caught-up incremental run:** API returns the latest posts first. Landing batches have `batchMax < dbMax`, all IDs already in DB (`insertCount === 0`) → high-watermark stop fires immediately; no scroll loop.
 
-**Gap backfill tradeoff:** High-watermark stop at the top can end the run **before** scrolling to older pages below DB `min` (e.g. missing posts between DB oldest and the 730-day cutoff). Those gaps insert via `postedAt < min` only if a run reaches those API batches (`insertCount > 0` prevents early stop). For a full history sweep, use a maiden or partial run where the top is not yet below `dbMax`, or accept that incremental runs optimize for “caught up at the top.”
+**Gap backfill tradeoff:** High-watermark stop at the top can end the run **before** scrolling to older pages below DB `min` (e.g. missing posts between DB oldest and the 730-day cutoff). Those gaps insert via `postedAt < min` only if a run reaches those API batches (`insertCount > 0` prevents early stop). For a full history sweep within the window, set `wall_scrape_force_backfill=1` in `config.env` (or `& '.\local_run\local_setup\set_creds_wall_backfill.ps1' -Enable`) to disable the high-watermark stop and scroll maiden-style until the 730-day cutoff or `hasMore=false`. Set back to `0` (or `-Disable`) for normal incremental runs.
+
+| `wall_scrape_force_backfill` | `0` (default) — incremental; stop when batch newest &lt; DB high watermark with no new rows |
+| `wall_scrape_force_backfill` | `1` — skip high-watermark stop; scroll for gap backfill until cutoff or `hasMore=false` |
 
 **Note:** `730` in `wall_scrape_max_age_days` is a **day count** (time window), not a row count. Logged post count (e.g. `260 posts`) is unrelated.
 
@@ -459,7 +469,7 @@ None of the above is implemented in `web_scrape.js` today; the correlated-subque
 
 **Maiden chat** (no rows / null bounds): high watermark stop does not apply; scroll continues until oldest or `hasMore=false`.
 
-**Media dimension** (`refreshSrcMediaDim` + `updateMediaDimHist`) runs after each chat batch and recalculates SCD Type 2 history for media IDs in that batch. Only batch-affected rows are appended to `media_dim_history`; older runs are pruned to the last **N** distinct `extract_ts` values (`media_dim_history_retain_runs` in `creds.env`, default **5**).
+**Media dimension** (`refreshSrcMediaDim` + `updateMediaDimHist`) runs after each chat batch and recalculates SCD Type 2 history for media IDs in that batch. Only batch-affected rows are appended to `media_dim_history`; older runs are pruned to the last **N** distinct `extract_ts` values (`media_dim_history_retain_runs` in `config.env`, default **5**).
 
 Prune groups by **`extract_ts`** (one timestamp per chat scrape session, shared by all scroll batches in that run). When a new scrape introduces a **6th** distinct `extract_ts` (with default `retain_runs=5`), all rows for the oldest `extract_ts` bucket are **deleted**. Earlier scrapes with ≤5 runs keep everything; wall/purchases modes do not touch `media_dim_history`.
 
@@ -554,7 +564,7 @@ WHERE json_extract_string(cm.fromUser, '$.id') = '253745725'
 | `Could not find key "hasCustomPreview"` | Media load uses `json_extract` in `getTgtInsertParts` |
 | `Table … does not have column "isMarkdownDisabled"` | Inserts use explicit column lists, not `INSERT BY NAME` with extra JSON fields |
 | Login submit redirects to `/my/chats/send` | Post-captcha submit runs only when the **login form** (`input[type="email"]` + password) is visible and chat UI (`.b-chats__scrollbar`) is not ready. Skipped when already on chat thread without login form, or when chat UI is loaded |
-| Wrong author loaded from `creds.env` | Comment inactive lines with `//` or `#`; only non-comment lines are parsed by `loadCredsEnv()` |
+| Wrong author loaded from `config.env` | Comment inactive lines with `//` or `#`; only non-comment lines are parsed by `loadConfigEnv()` |
 | `The browser is already running for …testChromeSession` | Stale `lockfile` / `DevToolsActivePort` / `Singleton*`, or Puppeteer Chromium still holding the profile. Script kills orphan `.cache\puppeteer` chrome, clears dead locks, or reuses a live session — see **Chromium / profile session** above |
 | Chromium shows **Profile error occurred** | Usually stale locks or a crashed prior session. Script auto-repairs locks and relaunches once. If it persists: stop orphan Puppeteer Chrome (command above), then rename `data\testChromeSession` → `testChromeSession.bak` and rerun (re-login required) |
 | Chromium disconnects on `Opening chat thread:` | **nav-v49+** — stealth on by default, `--disable-gpu` on Windows, warm-up + retry nav. Log: `nav-v49`, `Puppeteer ready (stealth)`. Set `puppeteer_stealth=0` only for debugging |
@@ -579,7 +589,8 @@ web_scrape/
     scrape_purchases.ps1
     local_setup/
       add_creds_author.ps1             # interactive add author + one-click script
-      set_creds_author.ps1             # switch active author in creds.env
+      set_creds_author.ps1             # switch active author in config.env
+      set_creds_wall_backfill.ps1      # toggle wall_scrape_force_backfill
       set_creds_author_180951488.ps1   # one-click activate author_id 180951488
       set_creds_author_253745725.ps1   # one-click activate author_id 253745725
       set_creds_author_24569249.ps1   # one-click activate author_id 24569249

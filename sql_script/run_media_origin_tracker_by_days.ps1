@@ -10,7 +10,7 @@ param(
     [string] $AuthorId,
     [int[]] $Days = @(30, 60, 90, 180, 365),
     [string] $SqlPath,
-    [string] $CredsPath,
+    [string] $configPath,
     [string] $DuckDbExe = 'C:\Users\dsouzaankit\Downloads\duckdb_cli-windows-amd64\duckdb.exe',
     [switch] $Writable
 )
@@ -95,16 +95,16 @@ function Get-MediaOriginSql {
     return ($sql -replace "(?m)^USE\s+web;\s*\r?\n", '')
 }
 
-if (-not $CredsPath) {
-    $CredsPath = Join-Path $HomeDirectory 'data\creds.env'
+if (-not $configPath) {
+    $configPath = Join-Path $HomeDirectory 'data\config.env'
 }
 if (-not $SqlPath) {
     $SqlPath = Join-Path $HomeDirectory 'sql_script\media_origin_date_tracker_multi_author.sql'
 }
 $DbPath = Join-Path $HomeDirectory 'data\web.db'
 
-if (-not (Test-Path -LiteralPath $CredsPath)) {
-    throw "creds.env not found: $CredsPath"
+if (-not (Test-Path -LiteralPath $configPath)) {
+    throw "config.env not found: $configPath"
 }
 if (-not (Test-Path -LiteralPath $SqlPath)) {
     throw "SQL script not found: $SqlPath"
@@ -117,7 +117,7 @@ if (-not (Test-Path -LiteralPath $DuckDbExe)) {
 }
 
 if (-not $AuthorId) {
-    $chatThread = Get-DotEnvValue -Path $CredsPath -Key 'chat_thread'
+    $chatThread = Get-DotEnvValue -Path $configPath -Key 'chat_thread'
     $AuthorId = Get-AuthorIdFromChatThread -ChatThreadUrl $chatThread
 }
 
@@ -146,8 +146,8 @@ if (-not $Writable) {
 Write-Host "Home:      $HomeDirectory"
 Write-Host "DB:        $DbPath"
 Write-Host "SQL:       $SqlPath"
-Write-Host "creds.env: $CredsPath"
-Write-Host "author_id: $AuthorId (from creds.env chat_thread)"
+Write-Host "config.env: $configPath"
+Write-Host "author_id: $AuthorId (from config.env chat_thread)"
 Write-Host "last_n_days windows: $($Days -join ', ')"
 if (-not $Writable) {
     Write-Host 'Mode:      read-only (pass -Writable to allow writes)'
