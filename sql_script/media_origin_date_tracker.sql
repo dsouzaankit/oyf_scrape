@@ -77,8 +77,8 @@ where year(t2g.posted_date) >= 2025
 and t1.media_duration > 0
 --and media_id = 4261547299
 --where posted_date between date '2025-12-01' and date '2026-01-31'
--- dedupe needed when a media_id from an older chat message is re-sent as part of latest chat message
-qualify row_number() over (partition by t1.author_id, t1.media_id order by created_date desc) = 1
+-- One row per message (chat_id) that contains the media; re-sent media in newer messages still appears on both rows.
+qualify row_number() over (partition by t1.author_id, t1.media_id, t1.chat_id order by created_date desc) = 1
 order by duration_ratio desc, media_duration desc
 --order by created_date desc
 ;

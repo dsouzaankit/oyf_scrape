@@ -12,7 +12,7 @@ Browser (Puppeteer) → intercept XHR → api_out.json → DuckDB (web.db)
                                                       ├── media_dim / media_dim_history  (chat scrape only)
                                                       └── dbt models (dbt_media_dim, …)
 
-sql_script/media_origin_date_tracker_multi_author.sql  →  approx wall-post origin date per chat media
+sql_script/media_origin_date_tracker_multi_author.sql  →  approx wall-post origin date per chat message (one row per message containing the media)
 ```
 
 | Component | Role |
@@ -316,7 +316,13 @@ Then rerun `node node_script/web_scrape.js chat` or `wall`.
 
 ## Media origin reporting
 
-Maps chat `media_id` to an approximate wall-post date (`approx_origin_date`) by comparing media ID bands on wall posts.
+Maps chat `media_id` to an approximate wall-post date (`approx_origin_date`) by comparing media ID bands on wall posts. Each output row is one **message** (`chat_id` = `stg_chat_messages.id`). If the same `media_id` was sent in multiple messages, **all** matching messages appear (not just the latest).
+
+**Output columns:** `author_id`, `chat_id`, `msg_text`, `created_date`, `media_id`, `media_duration`, `msg_price`, `media_count`, `duration_ratio`, `approx_origin_date`.
+
+**Dedup:** `QUALIFY` keeps one row per `(author_id, media_id, chat_id)` — re-sent promo clips in newer messages no longer collapse to a single “latest” row.
+
+**Inspect one media_id:** uncomment `media_id_filter` in the SQL file, e.g. `select unnest([4458229438::bigint]) as media_id`, then run `run_media_origin_tracker.ps1`.
 
 **SQL:** `sql_script/media_origin_date_tracker_multi_author.sql`
 
