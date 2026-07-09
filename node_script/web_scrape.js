@@ -2661,14 +2661,14 @@ function evaluateScrapeBatchStop({
     onStop,
 }) {
     const inWindowList = inWindow?.length ? inWindow : [];
-    const { minMs: batchMinMs } = getBatchMinMax(trimmed);
+    const { maxMs: batchNewestRawMs } = getBatchMinMax(trimmed);
     const { maxMs: batchMaxMs } = getBatchMinMax(inWindowList.length ? inWindowList : trimmed);
     if (!jsonResponse['hasMore']) {
         console.log(`${label} API hasMore=false; stopping scroll.`);
         onStop('hasMore');
-    } else if (batchMinMs != null && batchMinMs < minWindowMs) {
+    } else if (batchNewestRawMs != null && batchNewestRawMs < minWindowMs) {
         console.log(
-            `Batch oldest ${new Date(batchMinMs).toISOString()} ` +
+            `Batch newest ${new Date(batchNewestRawMs).toISOString()} ` +
             `is before ${maxAgeDays}-day cutoff ${new Date(minWindowMs).toISOString()}; stopping ${label} scroll.`
         );
         onStop('cutoff');

@@ -382,7 +382,7 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-ConfigPath`, `-DuckDb
 3. **Per batch** — only posts inside the window are inserted (`filterWallPostsByMinPostedAt`). Inserts also gap-fill via timestamp (`postedAt` &lt; min or &gt; max) and ID dedup (`NOT EXISTS` on `author.id` + `id`).
 4. **Stop when** any of:
    - `hasMore=false`
-   - batch oldest (raw API batch) is before the 730-day cutoff
+   - batch newest (raw API batch) is before the 730-day cutoff (entire page below window)
    - batch newest **within the window** is **strictly older than** DB **high watermark** (`max(postedAt)` in the window) **and** `insertCount === 0`
 5. **No low-watermark stop** — once scrolling starts, it is **not** stopped merely because the batch is below DB `min(postedAt)`; scroll continues toward the 730-day cutoff unless rule 4 applies.
 6. **Maiden author** (no rows for `author.id`): high watermark is null — rule 4 does not apply; scroll continues until cutoff or `hasMore=false`.
@@ -500,7 +500,7 @@ None of the above is implemented in `web_scrape.js` today; the correlated-subque
 2. **Per batch** — only messages inside the window are inserted (`filterChatMessagesByMinCreatedAt`). Inserts also gap-fill via timestamp (`createdAt` &lt; min or &gt; max) and ID dedup.
 3. **Stop when** any of:
    - `hasMore=false`
-   - batch oldest (raw API batch) is before the 730-day cutoff
+   - batch newest (raw API batch) is before the 730-day cutoff (entire page below window)
    - batch newest **within the window** is **strictly older than** DB **high watermark** (`max(createdAt)` in the window) **and** `insertCount === 0` — **skipped** when `chat_scrape_force_backfill=1`
 4. **No low-watermark stop** — scroll is **not** stopped merely because the batch is below DB `min(createdAt)`; scroll continues toward the 730-day cutoff unless rule 3 applies.
 5. **Keep scrolling** when `insertCount > 0` (new or gap-fill rows), even if batch newest is below the high watermark.
