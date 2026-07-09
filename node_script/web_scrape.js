@@ -2349,41 +2349,75 @@ function getBatchMinMaxCreatedAtMs(list) {
     return { minMs, maxMs };
 }
 
-async function getChatCreatedAtBoundsMs(chatUserId) {
+async function getChatCreatedAtBoundsMs(chatUserId, minCreatedAtMs) {
     const safeId = String(chatUserId || '').replace(/\D/g, '');
+    const windowTs = minCreatedAtMs != null
+        ? new Date(minCreatedAtMs).toISOString().replace('T', ' ').replace('Z', '')
+        : null;
     const connection = await instance.connect();
     try {
         const schema = await connection.runAndReadAll('DESCRIBE stg_chat_messages');
         const columns = new Set(schema.getRows().map(r => r[0]));
-        let whereSql = null;
-        if (columns.has('chatUserId') && safeId) {
-            whereSql = `cast(chatUserId as varchar) = '${safeId}'`;
-        } else if (safeId) {
-            // stg_chat_messages has no chatUserId — one chat thread per scrape; bounds over full table
-            whereSql = null;
+        let authorWhere = '';
+        if (safeId) {
+            if (columns.has('chatUserId')) {
+                authorWhere = `WHERE cast(chatUserId as varchar) = '${safeId}'`;
+            } else {
+                authorWhere = `WHERE fromUser.id = cast('${safeId}' AS bigint)`;
+            }
         }
         const reader = await connection.runAndReadAll(`
             SELECT
-                min(cast(createdAt as timestamp)) AS min_ts,
-                max(cast(createdAt as timestamp)) AS max_ts,
-                count(*) AS cnt
+                min(cast(createdAt AS timestamp)) FILTER (WHERE cast(createdAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_min_ts,
+                max(cast(createdAt AS timestamp)) FILTER (WHERE cast(createdAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_max_ts,
+                count(*) FILTER (WHERE cast(createdAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_cnt,
+                min(cast(createdAt AS timestamp)) AS abs_min_ts,
+                count(*) AS total_cnt
             FROM stg_chat_messages
-            ${whereSql ? `WHERE ${whereSql}` : ''}
+            ${authorWhere}
         `);
         const row = reader.getRows()[0];
-        if (!row || Number(row[2]) === 0) return { minMs: null, maxMs: null };
+        if (!row || Number(row[4]) === 0) {
+            return { minMs: null, maxMs: null, absMinMs: null, windowCount: 0, totalCount: 0 };
+        }
+        const absMinMs = row[3] != null ? new Date(row[3]).getTime() : null;
+        const windowCount = Number(row[2]) || 0;
+        const totalCount = Number(row[4]) || 0;
+        if (windowCount === 0) {
+            return {
+                minMs: null,
+                maxMs: null,
+                absMinMs: Number.isFinite(absMinMs) ? absMinMs : null,
+                windowCount: 0,
+                totalCount,
+            };
+        }
         const minMs = row[0] != null ? new Date(row[0]).getTime() : null;
         const maxMs = row[1] != null ? new Date(row[1]).getTime() : null;
         return {
             minMs: Number.isFinite(minMs) ? minMs : null,
             maxMs: Number.isFinite(maxMs) ? maxMs : null,
+            absMinMs: Number.isFinite(absMinMs) ? absMinMs : null,
+            windowCount,
+            totalCount,
         };
     } catch (err) {
-        if (/does not exist|Catalog Error/i.test(String(err.message))) return { minMs: null, maxMs: null };
+        if (/does not exist|Catalog Error/i.test(String(err.message))) {
+            return { minMs: null, maxMs: null, absMinMs: null, windowCount: 0, totalCount: 0 };
+        }
         throw err;
     } finally {
         await connection.disconnectSync();
     }
+}
+
+function filterChatMessagesByMinCreatedAt(list, minCreatedAtMs) {
+    if (minCreatedAtMs == null || !list?.length) return list || [];
+    return list.filter((msg) => {
+        if (!msg?.createdAt) return false;
+        const t = new Date(msg.createdAt).getTime();
+        return Number.isFinite(t) && t >= minCreatedAtMs;
+    });
 }
 
 function getBatchMinMaxPostedAtMs(list) {
@@ -2404,10 +2438,17 @@ function getBatchMaxPostedAtMs(list) {
     return getBatchMinMaxPostedAtMs(list).maxMs;
 }
 
-function getWallScrapeMinPostedAtMs() {
+function getScrapeMaxAgeDays() {
     const raw = parseInt(process.env.wall_scrape_max_age_days || '730', 10);
-    const days = Number.isFinite(raw) && raw > 0 ? raw : 730;
-    return Date.now() - days * 86400000;
+    return Number.isFinite(raw) && raw > 0 ? raw : 730;
+}
+
+function getWallScrapeMinPostedAtMs() {
+    return Date.now() - getScrapeMaxAgeDays() * 86400000;
+}
+
+function getChatScrapeMinCreatedAtMs() {
+    return getWallScrapeMinPostedAtMs();
 }
 
 function isTruthyCredsEnv(value) {
@@ -2417,6 +2458,10 @@ function isTruthyCredsEnv(value) {
 
 function isWallScrapeForceBackfillEnabled() {
     return isTruthyCredsEnv(process.env.wall_scrape_force_backfill);
+}
+
+function isChatScrapeForceBackfillEnabled() {
+    return isTruthyCredsEnv(process.env.chat_scrape_force_backfill);
 }
 
 function filterWallPostsByMinPostedAt(list, minPostedAtMs) {
@@ -3018,25 +3063,61 @@ async function scrapeChatMessages() {
     runDatetime = new Date();
     const enqueueChatBatch = createBatchQueue();
     const chatUserId = getAuthorIdFromCreds();
-    const chatBounds = await getChatCreatedAtBoundsMs(chatUserId);
+    const chatMaxAgeDays = process.env.wall_scrape_max_age_days || '730';
+    const chatMinCreatedAtMs = getChatScrapeMinCreatedAtMs();
+    const chatForceBackfill = isChatScrapeForceBackfillEnabled();
+
+    logStep('Reading chat createdAt bounds from DuckDB (before reload)...');
+    console.log(
+        `Chat scrape window: createdAt >= ${new Date(chatMinCreatedAtMs).toISOString()} ` +
+        `(wall_scrape_max_age_days=${chatMaxAgeDays})`
+    );
+    if (chatForceBackfill) {
+        console.log(
+            'chat_scrape_force_backfill=1: high-watermark stop disabled; ' +
+            'scrolling until 730-day cutoff or hasMore=false (maiden-style gap backfill).'
+        );
+    }
+    const chatBounds = await getChatCreatedAtBoundsMs(chatUserId, chatMinCreatedAtMs);
     const chatLowWatermarkMs = chatBounds.minMs;
     const chatHighWatermarkMs = chatBounds.maxMs;
+    const chatStopHint = chatForceBackfill
+        ? 'scroll up until 730-day cutoff or hasMore=false (force backfill)'
+        : 'scroll up until batch is older than DB high watermark with no new rows, 730-day cutoff, or hasMore=false';
     if (chatLowWatermarkMs != null && chatHighWatermarkMs != null) {
-        console.log(
-            `Chat DB bounds for ${chatUserId}: ` +
+        let boundsMsg =
+            `Chat DB bounds for ${chatUserId} (within ${chatMaxAgeDays}-day window): ` +
             `${new Date(chatLowWatermarkMs).toISOString()} .. ${new Date(chatHighWatermarkMs).toISOString()} ` +
-            `(incremental scroll — stop when batch newest is older than DB high watermark with no new rows, batch reaches DB oldest, or hasMore=false)`
+            `[${chatBounds.windowCount} messages`;
+        if (chatBounds.totalCount > chatBounds.windowCount) {
+            boundsMsg += `; ${chatBounds.totalCount} total in DB, oldest abs ${new Date(chatBounds.absMinMs).toISOString()} outside window`;
+        }
+        boundsMsg += `] (${chatStopHint})`;
+        console.log(boundsMsg);
+    } else if (chatBounds.totalCount > 0) {
+        console.log(
+            `Chat DB has ${chatBounds.totalCount} messages for ${chatUserId} but none within ${chatMaxAgeDays}-day window; ` +
+            `scrolling until cutoff or hasMore=false.`
         );
     } else {
-        console.log(`No existing chat messages for ${chatUserId}; scrolling until hasMore=false.`);
+        console.log(`No existing chat messages for ${chatUserId}; scrolling until cutoff or hasMore=false.`);
     }
 
-    function evaluateChatBatchStop(jsonResponse, trimmed, insertCount) {
-        const { minMs: batchMinMs, maxMs: batchMaxMs } = getBatchMinMaxCreatedAtMs(trimmed);
+    function evaluateChatBatchStop(jsonResponse, trimmed, list, insertCount) {
+        const inWindow = list?.length ? list : [];
+        const { minMs: batchMinMs } = getBatchMinMaxCreatedAtMs(trimmed);
+        const { maxMs: batchMaxMs } = getBatchMinMaxCreatedAtMs(inWindow.length ? inWindow : trimmed);
         if (!jsonResponse['hasMore']) {
             console.log('Chat API hasMore=false; stopping scroll.');
             needToScrollUp = false;
+        } else if (batchMinMs != null && batchMinMs < chatMinCreatedAtMs) {
+            console.log(
+                `Batch oldest createdAt ${new Date(batchMinMs).toISOString()} ` +
+                `is before ${chatMaxAgeDays}-day cutoff ${new Date(chatMinCreatedAtMs).toISOString()}; stopping chat scroll.`
+            );
+            needToScrollUp = false;
         } else if (
+            !chatForceBackfill &&
             chatHighWatermarkMs != null &&
             batchMaxMs != null &&
             batchMaxMs < chatHighWatermarkMs &&
@@ -3045,16 +3126,6 @@ async function scrapeChatMessages() {
             console.log(
                 `Batch newest ${new Date(batchMaxMs).toISOString()} ` +
                 `is older than DB high watermark ${new Date(chatHighWatermarkMs).toISOString()} with no new rows; stopping chat scroll.`
-            );
-            needToScrollUp = false;
-        } else if (
-            chatLowWatermarkMs != null &&
-            batchMaxMs != null &&
-            batchMaxMs <= chatLowWatermarkMs
-        ) {
-            console.log(
-                `Batch newest ${new Date(batchMaxMs).toISOString()} ` +
-                `<= DB oldest ${new Date(chatLowWatermarkMs).toISOString()}; stopping incremental scroll.`
             );
             needToScrollUp = false;
         }
@@ -3079,18 +3150,20 @@ async function scrapeChatMessages() {
             enqueueChatBatch(async () => {
                 const trimmed = trimChatListForDb(list);
                 const { minMs: batchMinMs, maxMs: batchMaxMs } = getBatchMinMaxCreatedAtMs(trimmed);
+                const inWindow = filterChatMessagesByMinCreatedAt(trimmed, chatMinCreatedAtMs);
                 console.log(
-                    `Chat API batch: ${trimmed.length} messages` +
+                    `Chat API batch: ${trimmed.length} messages (${inWindow.length} within ${chatMaxAgeDays}-day window)` +
                     (batchMaxMs != null ? `, newest ${new Date(batchMaxMs).toISOString()}` : '') +
                     (batchMinMs != null ? `, oldest ${new Date(batchMinMs).toISOString()}` : '')
                 );
-                if (trimmed.length === 0) {
-                    evaluateChatBatchStop(jsonResponse, trimmed, 0);
-                    return;
+                let insertCount = 0;
+                if (inWindow.length > 0) {
+                    writeJsonFileAtomic(apiOpFile, inWindow);
+                    insertCount = await loadChatToDb(apiOpFile, 'stg_chat_messages', runDatetime);
+                } else {
+                    console.log('Successfully loaded 0 rows into table "stg_chat_messages"');
                 }
-                writeJsonFileAtomic(apiOpFile, trimmed);
-                insertCount = await loadChatToDb(apiOpFile, 'stg_chat_messages', runDatetime);
-                evaluateChatBatchStop(jsonResponse, trimmed, insertCount);
+                evaluateChatBatchStop(jsonResponse, trimmed, inWindow, insertCount);
             });
         } catch (error) {
             logResponseParseError(error);

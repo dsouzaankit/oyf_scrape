@@ -1,13 +1,13 @@
-# Toggle wall_scrape_force_backfill in data/config.env.
-# When enabled (1), wall scrape skips the high-watermark early stop and scrolls
-# maiden-style until the 730-day cutoff or hasMore=false (gap backfill).
+# Toggle wall_scrape_force_backfill and chat_scrape_force_backfill in data/config.env.
+# When enabled (1), wall/chat scrape skip the high-watermark early stop and scroll
+# maiden-style for gap backfill (until 730-day cutoff or hasMore=false).
 #
 # Usage:
-#   .\set_creds_wall_backfill.ps1 -Enable
-#   .\set_creds_wall_backfill.ps1 -Disable
-#   .\set_creds_wall_backfill.ps1 -Toggle
-#   .\set_creds_wall_backfill.ps1 -Status
-#   .\set_creds_wall_backfill.ps1                    # interactive
+#   .\set_config_force_backfill.ps1 -Enable
+#   .\set_config_force_backfill.ps1 -Disable
+#   .\set_config_force_backfill.ps1 -Toggle
+#   .\set_config_force_backfill.ps1 -Status
+#   .\set_config_force_backfill.ps1                    # interactive
 #
 # Location: local_run\local_setup\
 
@@ -24,7 +24,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$KeyName = 'wall_scrape_force_backfill'
+$KeyNames = @('wall_scrape_force_backfill', 'chat_scrape_force_backfill')
 
 if (-not $configPath) {
     $configPath = Join-Path $HomeDirectory 'data\config.env'
@@ -132,13 +132,19 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 }
 
 $envLines = @(Get-Content -LiteralPath $configPath)
-$currentValue = Get-CredsEnvScalarValue -Rows $envLines -Key $KeyName
-$currentlyEnabled = Test-CredsEnvTruthy -Value $currentValue
+$currentStates = @{}
+foreach ($key in $KeyNames) {
+    $val = Get-CredsEnvScalarValue -Rows $envLines -Key $key
+    $currentStates[$key] = Test-CredsEnvTruthy -Value $val
+}
+$currentlyEnabled = ($currentStates.Values | Where-Object { $_ }).Count -eq $KeyNames.Count
 
 if ($Status) {
     Write-Host "config.env: $configPath"
-    $state = if ($currentlyEnabled) { 'enabled (1)' } else { 'disabled (0 or unset)' }
-    Write-Host "$KeyName`: $state"
+    foreach ($key in $KeyNames) {
+        $state = if ($currentStates[$key]) { 'enabled (1)' } else { 'disabled (0 or unset)' }
+        Write-Host "${key}: $state"
+    }
     return
 }
 
@@ -148,9 +154,11 @@ elseif ($Disable) { $targetEnabled = $false }
 elseif ($Toggle) { $targetEnabled = -not $currentlyEnabled }
 else {
     Write-Host "config.env: $configPath"
-    $state = if ($currentlyEnabled) { 'enabled' } else { 'disabled' }
-    Write-Host "Current $KeyName`: $state"
-    Write-Host 'Enable maiden-style wall gap backfill (disable high-watermark stop)? [y/N]'
+    foreach ($key in $KeyNames) {
+        $state = if ($currentStates[$key]) { 'enabled' } else { 'disabled' }
+        Write-Host "Current ${key}: $state"
+    }
+    Write-Host 'Enable maiden-style wall/chat gap backfill (disable high-watermark stop)? [y/N]'
     $answer = (Read-Host 'Enter y/yes to enable, n/no to disable, or blank to cancel').Trim().ToLowerInvariant()
     if ($answer -eq '') {
         Write-Host 'No changes.'
@@ -168,15 +176,25 @@ else {
 }
 
 $newValue = if ($targetEnabled) { '1' } else { '0' }
-if ($currentlyEnabled -eq $targetEnabled) {
-    Write-Host "$KeyName already set to $newValue in $configPath"
+$allMatch = $true
+foreach ($key in $KeyNames) {
+    if ($currentStates[$key] -ne $targetEnabled) { $allMatch = $false; break }
+}
+if ($allMatch) {
+    Write-Host "Force backfill already $($newValue) for wall and chat in $configPath"
     return
 }
 
-$updated = Set-CredsEnvScalarValue -Rows $envLines -Key $KeyName -Value $newValue
+$updated = $envLines
+foreach ($key in $KeyNames) {
+    $insertAfter = if ($key -eq 'chat_scrape_force_backfill') { 'wall_scrape_force_backfill' } else { 'wall_scrape_max_age_days' }
+    $updated = Set-CredsEnvScalarValue -Rows $updated -Key $key -Value $newValue -InsertAfterKey $insertAfter
+}
 
 Write-Host "config.env: $configPath"
-Write-Host "$KeyName=$newValue"
+foreach ($key in $KeyNames) {
+    Write-Host "$key=$newValue"
+}
 
 if ($WhatIf) {
     Write-Host 'WhatIf: no file changes written.'

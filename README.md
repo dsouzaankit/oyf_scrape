@@ -22,7 +22,7 @@ sql_script/media_origin_date_tracker_multi_author.sql  →  approx wall-post ori
 | `data/config.env` | Credentials, `chat_thread`, `wall_profile`, `of_web` (one author at a time) |
 | `data/testChromeSession/` | Persistent Chrome profile (cookies / session) |
 | `local_run/` | One-click scrape launchers (`scrape_*.ps1`) |
-| `local_run/local_setup/` | Author switchers (`set_creds_author*.ps1`) |
+| `local_run/local_setup/` | Author switchers (`set_config_author*.ps1`) |
 | `sql_script/` | Ad-hoc DuckDB analysis scripts + media-origin trackers |
 | `data/scripts/` | `compact_web_db` / `analyze_web_db` maintenance |
 | `dbt/webDataELT/` | dbt models for media dimension ELT |
@@ -85,6 +85,7 @@ wall_profile=https://...com/<creator>
 media_dim_history_retain_runs=5
 wall_scrape_max_age_days=730
 wall_scrape_force_backfill=0
+chat_scrape_force_backfill=0
 
 # alternate author (ignored)
 // chat_thread=https://...com/my/chats/chat/<other_author_id>
@@ -95,31 +96,31 @@ Control which creator is scraped by setting the active `chat_thread` and `wall_p
 
 **Comment lines:** `web_scrape.js` uses `loadConfigEnv()` which skips blank lines and lines starting with `#` or `//` before parsing. Comment out inactive authors with `//` (or `#`) so only the active URLs are loaded into `process.env`.
 
-**Switch author (one-click):** `local_run/local_setup/set_creds_author.ps1` uncomments the matching `chat_thread` + `wall_profile` pair for an `author_id` and comments out all other author pairs. Writes `data/config.env.bak` before updating.
+**Switch author (one-click):** `local_run/local_setup/set_config_author.ps1` uncomments the matching `chat_thread` + `wall_profile` pair for an `author_id` and comments out all other author pairs. Writes `data/config.env.bak` before updating.
 
 Scripts live under `local_run/local_setup/`.
 
-**Add author (interactive):** `add_creds_author.ps1` prompts for `chat_thread` and `wall_profile` URLs, appends the pair to `config.env` (commented), writes `set_creds_author_<author_id>.ps1`, and optionally activates the author.
+**Add author (interactive):** `add_config_author.ps1` prompts for `chat_thread` and `wall_profile` URLs, appends the pair to `config.env` (commented), writes `set_config_author_<author_id>.ps1`, and optionally activates the author.
 
 ```powershell
-& '.\local_run\local_setup\add_creds_author.ps1'
-& '.\local_run\local_setup\add_creds_author.ps1' -Activate
-& '.\local_run\local_setup\set_creds_author.ps1' -List
-& '.\local_run\local_setup\set_creds_author.ps1' -AuthorId 180951488
-& '.\local_run\local_setup\set_creds_author.ps1'                    # interactive menu
-& '.\local_run\local_setup\set_creds_wall_backfill.ps1' -Enable    # maiden-style wall gap backfill
-& '.\local_run\local_setup\set_creds_wall_backfill.ps1' -Disable   # default incremental wall stop
-& '.\local_run\local_setup\set_creds_wall_backfill.ps1' -Status
+& '.\local_run\local_setup\add_config_author.ps1'
+& '.\local_run\local_setup\add_config_author.ps1' -Activate
+& '.\local_run\local_setup\set_config_author.ps1' -List
+& '.\local_run\local_setup\set_config_author.ps1' -AuthorId 180951488
+& '.\local_run\local_setup\set_config_author.ps1'                    # interactive menu
+& '.\local_run\local_setup\set_config_force_backfill.ps1' -Enable    # maiden-style wall/chat gap backfill
+& '.\local_run\local_setup\set_config_force_backfill.ps1' -Disable   # default incremental stop
+& '.\local_run\local_setup\set_config_force_backfill.ps1' -Status
 ```
 
 **One-click per author:**
 
 | Shortcut | Author |
 |----------|--------|
-| `local_run/local_setup/set_creds_author_180951488.ps1` | `180951488` |
-| `local_run/local_setup/set_creds_author_253745725.ps1` | `253745725` |
+| `local_run/local_setup/set_config_author_180951488.ps1` | `180951488` |
+| `local_run/local_setup/set_config_author_253745725.ps1` | `253745725` |
 
-Add another author with `add_creds_author.ps1` (recommended), or copy an existing pair + `set_creds_author_<author_id>.ps1` manually.
+Add another author with `add_config_author.ps1` (recommended), or copy an existing pair + `set_config_author_<author_id>.ps1` manually.
 
 The numeric segment in `chat_thread` (`/chat/<author_id>`) is also used by the media-origin reporting scripts to filter results.
 
@@ -180,10 +181,10 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_u
 | `local_run/scrape_chat.ps1` | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
 | `local_run/scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
 | `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
-| `local_run/local_setup/add_creds_author.ps1` | Interactive add author URLs + create `set_creds_author_<author_id>.ps1` |
-| `local_run/local_setup/set_creds_author.ps1` | Activate one author in `data/config.env` (`chat_thread` + `wall_profile` pair) |
-| `local_run/local_setup/set_creds_wall_backfill.ps1` | Toggle `wall_scrape_force_backfill` (disable high-watermark stop for gap backfill) |
-| `local_run/local_setup/set_creds_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
+| `local_run/local_setup/add_config_author.ps1` | Interactive add author URLs + create `set_config_author_<author_id>.ps1` |
+| `local_run/local_setup/set_config_author.ps1` | Activate one author in `data/config.env` (`chat_thread` + `wall_profile` pair) |
+| `local_run/local_setup/set_config_force_backfill.ps1` | Toggle `wall_scrape_force_backfill` and `chat_scrape_force_backfill` (disable high-watermark stop for gap backfill) |
+| `local_run/local_setup/set_config_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
 | `data/scripts/compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
 | `sql_script/open_web_db.ps1` | DuckDB CLI: attach `data/web.db` as schema `web` (write when possible; `-ReadOnly` to force) |
 
@@ -376,10 +377,12 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-ConfigPath`, `-DuckDb
 
 **Typical caught-up incremental run:** API returns the latest posts first. Landing batches have `batchMax < dbMax`, all IDs already in DB (`insertCount === 0`) → high-watermark stop fires immediately; no scroll loop.
 
-**Gap backfill tradeoff:** High-watermark stop at the top can end the run **before** scrolling to older pages below DB `min` (e.g. missing posts between DB oldest and the 730-day cutoff). Those gaps insert via `postedAt < min` only if a run reaches those API batches (`insertCount > 0` prevents early stop). For a full history sweep within the window, set `wall_scrape_force_backfill=1` in `config.env` (or `& '.\local_run\local_setup\set_creds_wall_backfill.ps1' -Enable`) to disable the high-watermark stop and scroll maiden-style until the 730-day cutoff or `hasMore=false`. Set back to `0` (or `-Disable`) for normal incremental runs.
+**Gap backfill tradeoff:** High-watermark stop at the top can end the run **before** scrolling to older pages below DB `min` (e.g. missing posts between DB oldest and the 730-day cutoff). Those gaps insert via `postedAt < min` only if a run reaches those API batches (`insertCount > 0` prevents early stop). For a full history sweep within the window, set `wall_scrape_force_backfill=1` and/or `chat_scrape_force_backfill=1` in `config.env` (or `& '.\local_run\local_setup\set_config_force_backfill.ps1' -Enable` to set both).
 
 | `wall_scrape_force_backfill` | `0` (default) — incremental; stop when batch newest &lt; DB high watermark with no new rows |
 | `wall_scrape_force_backfill` | `1` — skip high-watermark stop; scroll for gap backfill until cutoff or `hasMore=false` |
+| `chat_scrape_force_backfill` | `0` (default) — incremental; stop when batch newest &lt; DB high watermark with no new rows |
+| `chat_scrape_force_backfill` | `1` — skip high-watermark stop; scroll for gap backfill until 730-day cutoff or `hasMore=false` |
 
 **Note:** `730` in `wall_scrape_max_age_days` is a **day count** (time window), not a row count. Logged post count (e.g. `260 posts`) is unrelated.
 
@@ -460,14 +463,21 @@ Indexes speed up bounds queries and batch anti-joins; they **do not** fix per-ro
 
 None of the above is implemented in `web_scrape.js` today; the correlated-subquery pattern was kept after a batch-CTE experiment proved correctness-sensitive.
 
-**Chat scroll stop** (scroll **up**, API `order=desc`): after reload, processes one batch at a time (waits for DuckDB load before next scroll). **`insertCount`** is the DuckDB `INSERT … RETURNING` row count (same as wall). Stops when:
+**Chat scroll stop** (scroll **up**, API `order=desc` — newest batch first): after reload, processes one batch at a time (waits for DuckDB load before next scroll). Same rules as wall, adapted for `createdAt` / scroll-up. **`insertCount`** is the DuckDB `INSERT … RETURNING` row count.
 
-1. `hasMore=false`, or
-2. Batch newest `createdAt` is older than pre-run DB **high watermark** (`max(createdAt)`) **and** inserts are zero, or
-3. Batch newest `createdAt` ≤ pre-run DB oldest (reached existing history), or
-4. No API response after 15 scrolls.
+1. **Before reload** — `getChatCreatedAtBoundsMs(author, cutoff)` reads `min`/`max` `createdAt` for the sender **only where** `createdAt >= now - wall_scrape_max_age_days` (default **730** days). `min` is logged only (not used to stop scroll). `max` is the **high watermark** for scroll-stop.
+2. **Per batch** — only messages inside the window are inserted (`filterChatMessagesByMinCreatedAt`). Inserts also gap-fill via timestamp (`createdAt` &lt; min or &gt; max) and ID dedup.
+3. **Stop when** any of:
+   - `hasMore=false`
+   - batch oldest (raw API batch) is before the 730-day cutoff
+   - batch newest **within the window** is **strictly older than** DB **high watermark** (`max(createdAt)` in the window) **and** `insertCount === 0` — **skipped** when `chat_scrape_force_backfill=1`
+4. **No low-watermark stop** — scroll is **not** stopped merely because the batch is below DB `min(createdAt)`; scroll continues toward the 730-day cutoff unless rule 3 applies.
+5. **Keep scrolling** when `insertCount > 0` (new or gap-fill rows), even if batch newest is below the high watermark.
+6. No API response after 15 scrolls.
 
-**Maiden chat** (no rows / null bounds): high watermark stop does not apply; scroll continues until oldest or `hasMore=false`.
+**Typical caught-up incremental chat run:** landing batches are duplicates below DB `max(createdAt)` → high-watermark stop fires immediately (unless force backfill).
+
+**Maiden chat** (no rows / null bounds): high watermark stop does not apply; scroll continues until cutoff or `hasMore=false`.
 
 **Media dimension** (`refreshSrcMediaDim` + `updateMediaDimHist`) runs after each chat batch and recalculates SCD Type 2 history for media IDs in that batch. Only batch-affected rows are appended to `media_dim_history`; older runs are pruned to the last **N** distinct `extract_ts` values (`media_dim_history_retain_runs` in `config.env`, default **5**).
 
@@ -588,12 +598,12 @@ web_scrape/
     scrape_wall.ps1
     scrape_purchases.ps1
     local_setup/
-      add_creds_author.ps1             # interactive add author + one-click script
-      set_creds_author.ps1             # switch active author in config.env
-      set_creds_wall_backfill.ps1      # toggle wall_scrape_force_backfill
-      set_creds_author_180951488.ps1   # one-click activate author_id 180951488
-      set_creds_author_253745725.ps1   # one-click activate author_id 253745725
-      set_creds_author_24569249.ps1   # one-click activate author_id 24569249
+      add_config_author.ps1             # interactive add author + one-click script
+      set_config_author.ps1             # switch active author in config.env
+      set_config_force_backfill.ps1      # toggle wall/chat scrape_force_backfill
+      set_config_author_180951488.ps1   # one-click activate author_id 180951488
+      set_config_author_253745725.ps1   # one-click activate author_id 253745725
+      set_config_author_24569249.ps1   # one-click activate author_id 24569249
   data/scripts/
     compact_web_db.ps1                 # CHECKPOINT + VACUUM web.db
     compact_web_db.js

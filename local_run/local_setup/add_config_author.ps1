@@ -1,9 +1,9 @@
 # Interactively add a chat_thread + wall_profile author pair to config.env and create
-# set_creds_author_<author_id>.ps1 one-click activator.
+# set_config_author_<author_id>.ps1 one-click activator.
 #
 # Usage:
-#   .\add_creds_author.ps1
-#   .\add_creds_author.ps1 -Activate
+#   .\add_config_author.ps1
+#   .\add_config_author.ps1 -Activate
 
 param(
     [string] $HomeDirectory = $(if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'P:\all_scripts\oyf_scrape' }),
@@ -93,13 +93,13 @@ function Write-AuthorOneClickScript {
         [string] $AuthorId
     )
 
-    $path = Join-Path $TargetDir "set_creds_author_$AuthorId.ps1"
+    $path = Join-Path $TargetDir "set_config_author_$AuthorId.ps1"
     @"
 # One-click: activate author_id $AuthorId in data/config.env
-# From repo root: & '.\local_run\local_setup\set_creds_author_$AuthorId.ps1'
+# From repo root: & '.\local_run\local_setup\set_config_author_$AuthorId.ps1'
 `$ErrorActionPreference = 'Stop'
 Set-Location `$PSScriptRoot
-& "`$PSScriptRoot\set_creds_author.ps1" -AuthorId $AuthorId
+& "`$PSScriptRoot\set_config_author.ps1" -AuthorId $AuthorId
 `$code = `$LASTEXITCODE
 if (`$null -eq `$code) { `$code = 0 }
 if (`$Host.Name -eq 'ConsoleHost' -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
@@ -169,11 +169,11 @@ Write-Host "backup:      $backupPath"
 
 if ($Activate) {
     Write-Host 'Activating author...'
-    & (Join-Path $ScriptDir 'set_creds_author.ps1') -AuthorId $AuthorId -ConfigPath $configPath
+    & (Join-Path $ScriptDir 'set_config_author.ps1') -AuthorId $AuthorId -ConfigPath $configPath
 }
 else {
     $ans = Read-Host 'Activate this author now? [y/N]'
     if ($ans -match '^(y|yes)$') {
-        & (Join-Path $ScriptDir 'set_creds_author.ps1') -AuthorId $AuthorId -ConfigPath $configPath
+        & (Join-Path $ScriptDir 'set_config_author.ps1') -AuthorId $AuthorId -ConfigPath $configPath
     }
 }

@@ -2,9 +2,9 @@
 # and commenting out every other author pair.
 #
 # Usage:
-#   .\set_creds_author.ps1 -AuthorId 180951488
-#   .\set_creds_author.ps1 -List
-#   .\set_creds_author.ps1                    # interactive menu
+#   .\set_config_author.ps1 -AuthorId 180951488
+#   .\set_config_author.ps1 -List
+#   .\set_config_author.ps1                    # interactive menu
 #
 # Location: local_run\local_setup\
 
