@@ -573,6 +573,39 @@ node .\data\scripts\analyze_web_db.js --deep
 
 Override path with `$env:WEB_SCRAPE_DB` or pass the `.db` path as the last argument.
 
+## TBD
+
+### `media_chat_link` SCD (media ↔ message linkage)
+
+**Problem:** `media_dim` grain is `(author_id, media_id)` only. `valid_from_ts` comes from message `createdAt`, but **`chat_id` is not stored**. `refreshSrcMediaDim` uses `SELECT DISTINCT author_id, media_id`, so the same clip in multiple messages collapses to one row per batch. SCD there tracks **re-sends over time**, not **which messages** held the media.
+
+**Today:** per-message linkage is answered by querying `stg_chat_messages` directly (see media origin tracker and example queries below).
+
+**Proposed:** bridge table **`media_chat_link`** (and optional `media_chat_link_history`) with SCD Type 2 at grain **`(author_id, media_id, chat_id)`**:
+
+| Column | Source |
+|--------|--------|
+| `author_id` | `fromUser.id` |
+| `media_id` | `unnest(media).id` |
+| `chat_id` | `stg_chat_messages.id` |
+| `valid_from_ts` | `createdAt` |
+| `valid_to_ts` | parent message `expired_ts`, or open while active |
+| `is_current` | `valid_to_ts IS NULL` |
+| `extract_ts` | scrape session timestamp (same pattern as `media_dim`) |
+
+**Intersecting intervals:** one `media_id` in multiple `chat_id` values yields multiple rows; intervals `[valid_from_ts, valid_to_ts)` can overlap in calendar time. Overlap query (sketch):
+
+```sql
+SELECT a.media_id, a.chat_id AS chat_a, b.chat_id AS chat_b
+FROM media_chat_link a
+JOIN media_chat_link b
+  ON a.author_id = b.author_id AND a.media_id = b.media_id AND a.chat_id < b.chat_id
+WHERE a.valid_from_ts < coalesce(b.valid_to_ts, current_timestamp)
+  AND b.valid_from_ts < coalesce(a.valid_to_ts, current_timestamp);
+```
+
+**Population (not implemented):** derive from `unnest(media)` on chat load; revive when `expired_ts` clears on the parent message; close `valid_to_ts` when the message is soft-deleted after force backfill. Keep **`media_dim`** as the media-attribute historical ledger; use **`media_chat_link`** for message linkage.
+
 ## dbt models
 
 | Model | Description |
