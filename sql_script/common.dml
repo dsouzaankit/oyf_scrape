@@ -125,5 +125,6 @@ DETACH web;
 
 -- DELETE FROM stg_chat_messages;
 -- DELETE FROM stg_chat_messages where json_extract_string(fromUser, '$.id') = '180951488';
+-- delete from stg_wall_posts WHERE author.id = 24569249;
 
 -- .exit

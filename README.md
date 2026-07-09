@@ -178,6 +178,7 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_u
 | `local_run/local_setup/set_creds_author.ps1` | Activate one author in `data/creds.env` (`chat_thread` + `wall_profile` pair) |
 | `local_run/local_setup/set_creds_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
 | `data/scripts/compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
+| `sql_script/open_web_db.ps1` | DuckDB CLI: attach `data/web.db` as schema `web` (write when possible; `-ReadOnly` to force) |
 
 Run **one mode per invocation** for CLI scrapes — chat, wall, and purchases are separate processes.
 
@@ -255,7 +256,7 @@ If a click misses, set the matching selector in `creds.env` to the live CSS id/c
 
 **Chat:** stays on `chat_thread`; intercepts `api2/v2/chats/…/messages`, loads `stg_chat_messages`, scrolls **up**.
 
-**Wall:** navigates to `wall_profile`; intercepts posts API, scrolls **down** until high watermark, a **2-year** `postedAt` cutoff (`wall_scrape_max_age_days=730` in `creds.env`), or `hasMore=false`.
+**Wall:** reads DB bounds **before navigation**; API is **newest-first** (`publish_date_desc`). Scrolls **down** for older posts. Typical incremental run exits early when landing batches are duplicates below DB `max(postedAt)`; otherwise scrolls to the **730-day** cutoff or `hasMore=false`.
 
 **Purchases:** navigates to `of_web` (its home is ok after login — **not** used as login entry), **clicks** `#Purchased` then `#purchased-chat` (overrides: `purchases_tab_selector`, `purchases_click_selector`), scrolls **down**, loads `stg_chat_unlocks`.
 
@@ -344,16 +345,119 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-CredsPath`, `-DuckDbE
 
 ## Incremental load logic
 
-**Chat / wall inserts** use a per-author timestamp watermark: only rows with `createdAt` / `postedAt` outside the existing min/max for that author are inserted.
+**Chat / wall inserts** use a per-author timestamp watermark plus ID dedup:
 
-**Wall scroll stop:** before scrolling, reads `max(postedAt)` for the author from `stg_wall_posts` and computes a lower bound `postedAt >= now - wall_scrape_max_age_days` (default **730** days / ~2 years). After each API batch (newest-first / `publish_date_desc`), only posts inside that window are loaded. Stops when `hasMore=false`, when the batch’s oldest `postedAt` is before the cutoff, when the batch’s newest `postedAt` is at or below the DB high watermark, or when the batch inserts zero rows.
+- Insert when `createdAt` / `postedAt` is **older** than the author’s DB min or **newer** than the DB max (catch-up / backfill).
+- **Or** when the message/post `id` is not already in the table (gap-fill inside the existing time range).
+- Chat: `NOT EXISTS` on `id` only (one thread per scrape).
+- Wall: `NOT EXISTS` on `(author.id, id)`.
 
-**Chat scroll stop** (scroll **up**, API `order=desc`): after reload, processes one batch at a time (waits for DuckDB load before next scroll). Stops when:
+**Wall scroll stop** (scroll **down**, API `publish_date_desc` — newest batch first):
+
+**`insertCount`** — rows actually inserted by DuckDB (`INSERT … RETURNING 1` row count). `0` means the batch was all duplicates / filtered out; scroll-stop rules use this value.
+
+1. **Before navigation** — `getWallPostedAtBoundsMs(author, cutoff)` reads `min`/`max` `postedAt` for the author **only where** `postedAt >= now - wall_scrape_max_age_days` (default **730** days / ~2 years). `min` is logged only (not used to stop scroll). `max` is the **high watermark** for scroll-stop.
+2. **Landing batches** — API responses during profile load are processed like scroll batches. If a stop condition is met before navigation finishes, the scroll loop is **not** restarted.
+3. **Per batch** — only posts inside the window are inserted (`filterWallPostsByMinPostedAt`). Inserts also gap-fill via timestamp (`postedAt` &lt; min or &gt; max) and ID dedup (`NOT EXISTS` on `author.id` + `id`).
+4. **Stop when** any of:
+   - `hasMore=false`
+   - batch oldest (raw API batch) is before the 730-day cutoff
+   - batch newest **within the window** is **strictly older than** DB **high watermark** (`max(postedAt)` in the window) **and** `insertCount === 0`
+5. **No low-watermark stop** — once scrolling starts, it is **not** stopped merely because the batch is below DB `min(postedAt)`; scroll continues toward the 730-day cutoff unless rule 4 applies.
+6. **Maiden author** (no rows for `author.id`): high watermark is null — rule 4 does not apply; scroll continues until cutoff or `hasMore=false`.
+7. **Keep scrolling** when `insertCount > 0` (new or gap-fill rows), even if batch newest is below the high watermark.
+
+**Typical caught-up incremental run:** API returns the latest posts first. Landing batches have `batchMax < dbMax`, all IDs already in DB (`insertCount === 0`) → high-watermark stop fires immediately; no scroll loop.
+
+**Gap backfill tradeoff:** High-watermark stop at the top can end the run **before** scrolling to older pages below DB `min` (e.g. missing posts between DB oldest and the 730-day cutoff). Those gaps insert via `postedAt < min` only if a run reaches those API batches (`insertCount > 0` prevents early stop). For a full history sweep, use a maiden or partial run where the top is not yet below `dbMax`, or accept that incremental runs optimize for “caught up at the top.”
+
+**Note:** `730` in `wall_scrape_max_age_days` is a **day count** (time window), not a row count. Logged post count (e.g. `260 posts`) is unrelated.
+
+### Scalability at 1M+ rows (not implemented)
+
+The scraper is tuned for **incremental** loads at typical scale: hundreds–low thousands of rows per author, wall capped at ~2 years (`wall_scrape_max_age_days=730`). Logic is correct at any size; **performance** degrades once a target table (or one author’s slice of a multi-author table) approaches **1M+ rows**.
+
+#### Where time goes today
+
+| Operation | When | Cost at 1M+ |
+|-----------|------|-------------|
+| `getWallPostedAtBoundsMs` / `getChatCreatedAtBoundsMs` | Once per scrape (before scroll) | Full scan / aggregate on `stg_*` (wall uses `author.id`; chat may scan whole table if no `chatUserId` column) |
+| `loadWallPostsToDb` / `loadChatToDb` | Every API batch (~10–50 rows) | **Per incoming row:** two correlated `min`/`max` subqueries + one `NOT EXISTS` ID probe |
+| `loadChatUnlocksToDb` | Purchases batches | Per-row `min`/`max` only (no ID dedup) |
+| `refreshSrcMediaDim` + `updateMediaDimHist` | After chat batches with inserts | Scales with batch media IDs + history table size (separate from wall) |
+
+Insert SQL pattern (wall example — chat is analogous on `createdAt` / `fromUser`):
+
+```sql
+-- Simplified: each wp row re-runs these subqueries
+WHERE postedAt < (SELECT min(postedAt) FROM stg_wall_posts WHERE json_extract_string(author,'$.id') = ...)
+   OR postedAt > (SELECT max(postedAt) FROM stg_wall_posts WHERE json_extract_string(author,'$.id') = ...)
+   OR NOT EXISTS (SELECT 1 FROM stg_wall_posts t WHERE t.id = wp.id AND json_extract_string(t.author,'$.id') = ...)
+```
+
+**Scroll-stop bounds** already use struct fields (`author.id` in `getWallPostedAtBoundsMs`), but **insert** filters still use `json_extract_string(...)` — so manual indexes on `author.id` / `fromUser.id` help pre-scroll aggregates more than they help per-batch inserts unless insert SQL is aligned.
+
+| Table rows (relevant slice) | Typical batch load |
+|-----------------------------|-------------------|
+| &lt; ~10k | Sub-second |
+| ~10k–100k | Noticeable; repeated scans per batch |
+| 1M+ | Multi-second batches; full history scrape impractical without refactor |
+
+Monitor growth: `node data/scripts/analyze_web_db.js` (read-only; safe during scrape).
+
+#### Refactor roadmap (priority)
+
+**1. Bind watermarks from JS (lowest effort)** — bounds are already computed before scroll (`getWallPostedAtBoundsMs`, `getChatCreatedAtBoundsMs`). Pass `minMs` / `maxMs` as SQL literals in the `INSERT … SELECT` instead of per-row subqueries. Scroll-stop and insert logic stay in sync; removes ~2× table scans per batch row.
+
+**2. Batch-scoped ID anti-join (medium)** — one lookup for the whole batch instead of `NOT EXISTS` per row:
+
+```sql
+WITH batch AS (
+  SELECT * FROM read_json_auto('…', union_by_name=true)
+),
+existing AS (
+  SELECT t.id FROM stg_wall_posts t
+  INNER JOIN (SELECT DISTINCT id, author.id AS author_id FROM batch) b
+    ON t.id = b.id AND t.author.id = b.author_id
+)
+SELECT … FROM batch wp
+WHERE … -- timestamp rules
+  AND NOT EXISTS (SELECT 1 FROM existing e WHERE e.id = wp.id);
+```
+
+Wall dedup is `(author.id, id)`. Chat insert dedup is **`id` only** (table-wide) — at 1M+ chat rows across threads, consider scoping to `fromUser.id` to match watermark filters.
+
+**3. Align filters with indexable columns (medium)** — use `author.id` / `fromUser.id` in insert `WHERE` (same as bounds queries), or add persisted generated columns, e.g. `author_id BIGINT`, and index those. Required for indexes to help insert path.
+
+**4. Indexes (manual; not created by this repo)** — create when scraper is **not** holding a write lock:
+
+```sql
+-- wall (multi-author)
+CREATE INDEX IF NOT EXISTS idx_wall_author_id ON stg_wall_posts (author.id, id);
+CREATE INDEX IF NOT EXISTS idx_wall_author_posted ON stg_wall_posts (author.id, postedAt);
+
+-- chat (per-sender incremental + dedup if scoped)
+CREATE INDEX IF NOT EXISTS idx_chat_fromuser_id ON stg_chat_messages (fromUser.id, id);
+CREATE INDEX IF NOT EXISTS idx_chat_fromuser_created ON stg_chat_messages (fromUser.id, createdAt);
+
+-- purchases (account-wide feed; watermark is global min/max)
+CREATE INDEX IF NOT EXISTS idx_unlocks_created ON stg_chat_unlocks (createdAt);
+```
+
+Indexes speed up bounds queries and batch anti-joins; they **do not** fix per-row correlated subqueries if insert SQL is left unchanged.
+
+**5. Larger changes (only if needed)** — staging table + `INSERT … SELECT` merge per run; per-author partition or separate tables; drop redundant ID dedup when scroll-stop guarantees no overlap (wall high-watermark path only inserts gap rows — still need ID dedup for gaps and maiden runs).
+
+None of the above is implemented in `web_scrape.js` today; the correlated-subquery pattern was kept after a batch-CTE experiment proved correctness-sensitive.
+
+**Chat scroll stop** (scroll **up**, API `order=desc`): after reload, processes one batch at a time (waits for DuckDB load before next scroll). **`insertCount`** is the DuckDB `INSERT … RETURNING` row count (same as wall). Stops when:
 
 1. `hasMore=false`, or
-2. Batch newest `createdAt` ≤ pre-run DB oldest (reached existing history), or
-3. Two consecutive zero-insert batches fully inside the pre-run `[oldest .. newest]` range (duplicate territory), or
+2. Batch newest `createdAt` is older than pre-run DB **high watermark** (`max(createdAt)`) **and** inserts are zero, or
+3. Batch newest `createdAt` ≤ pre-run DB oldest (reached existing history), or
 4. No API response after 15 scrolls.
+
+**Maiden chat** (no rows / null bounds): high watermark stop does not apply; scroll continues until oldest or `hasMore=false`.
 
 **Media dimension** (`refreshSrcMediaDim` + `updateMediaDimHist`) runs after each chat batch and recalculates SCD Type 2 history for media IDs in that batch. Only batch-affected rows are appended to `media_dim_history`; older runs are pruned to the last **N** distinct `extract_ts` values (`media_dim_history_retain_runs` in `creds.env`, default **5**).
 

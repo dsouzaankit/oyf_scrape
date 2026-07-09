@@ -2210,6 +2210,7 @@ async function getTgtInsertParts(connection, tableName, jsonAlias, filePath) {
     jsonCols = filePath ? await getJsonCols(connection, filePath) : null;
     selectStr = tableRows.map(col => {
         const colName = col[0];
+        const colType = String(col[1] || '').toUpperCase();
         if (colName === 'media') {
             if (jsonCols && !jsonCols.has('media')) {
                 return `NULL AS ${colName}`;
@@ -2218,6 +2219,9 @@ async function getTgtInsertParts(connection, tableName, jsonAlias, filePath) {
         }
         if (jsonCols && !jsonCols.has(colName)) {
             return `NULL AS ${colName}`;
+        }
+        if (colType === 'JSON') {
+            return `CASE WHEN ${jsonAlias}.${colName} IS NULL THEN NULL ELSE to_json(${jsonAlias}.${colName}) END AS ${colName}`;
         }
         return `${jsonAlias}.${colName} AS ${colName}`;
     }).join(', ');
@@ -2228,6 +2232,7 @@ async function getTgtSelectExpr(connection, tableName, jsonAlias, filePath) {
     parts = await getTgtInsertParts(connection, tableName, jsonAlias, filePath);
     return parts.selectStr;
 }
+
 
 function trimMediaBlob(mediaItem) {
     const {
@@ -2401,22 +2406,53 @@ function filterWallPostsByMinPostedAt(list, minPostedAtMs) {
     });
 }
 
-async function getWallPostedAtHighWatermarkMs(authorId) {
+async function getWallPostedAtBoundsMs(authorId, minPostedAtMs) {
     const safeId = String(authorId || '').replace(/\D/g, '');
-    if (!safeId) return null;
+    if (!safeId) return { minMs: null, maxMs: null, absMinMs: null, windowCount: 0, totalCount: 0 };
+    const windowTs = minPostedAtMs != null
+        ? new Date(minPostedAtMs).toISOString().replace('T', ' ').replace('Z', '')
+        : null;
     const connection = await instance.connect();
     try {
         const reader = await connection.runAndReadAll(`
-            SELECT max(cast(postedAt as timestamp)) AS max_ts
+            SELECT
+                min(cast(postedAt AS timestamp)) FILTER (WHERE cast(postedAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_min_ts,
+                max(cast(postedAt AS timestamp)) FILTER (WHERE cast(postedAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_max_ts,
+                count(*) FILTER (WHERE cast(postedAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_cnt,
+                min(cast(postedAt AS timestamp)) AS abs_min_ts,
+                count(*) AS total_cnt
             FROM stg_wall_posts
-            WHERE json_extract_string(author, '$.id') = '${safeId}'
+            WHERE author.id = cast('${safeId}' AS bigint)
         `);
-        const val = reader.getRows()[0]?.[0];
-        if (val == null) return null;
-        const t = new Date(val).getTime();
-        return Number.isFinite(t) ? t : null;
+        const row = reader.getRows()[0];
+        if (!row || Number(row[4]) === 0) {
+            return { minMs: null, maxMs: null, absMinMs: null, windowCount: 0, totalCount: 0 };
+        }
+        const absMinMs = row[3] != null ? new Date(row[3]).getTime() : null;
+        const windowCount = Number(row[2]) || 0;
+        const totalCount = Number(row[4]) || 0;
+        if (windowCount === 0) {
+            return {
+                minMs: null,
+                maxMs: null,
+                absMinMs: Number.isFinite(absMinMs) ? absMinMs : null,
+                windowCount: 0,
+                totalCount,
+            };
+        }
+        const minMs = row[0] != null ? new Date(row[0]).getTime() : null;
+        const maxMs = row[1] != null ? new Date(row[1]).getTime() : null;
+        return {
+            minMs: Number.isFinite(minMs) ? minMs : null,
+            maxMs: Number.isFinite(maxMs) ? maxMs : null,
+            absMinMs: Number.isFinite(absMinMs) ? absMinMs : null,
+            windowCount,
+            totalCount,
+        };
     } catch (err) {
-        if (/does not exist|Catalog Error/i.test(String(err.message))) return null;
+        if (/does not exist|Catalog Error/i.test(String(err.message))) {
+            return { minMs: null, maxMs: null, absMinMs: null, windowCount: 0, totalCount: 0 };
+        }
         throw err;
     } finally {
         await connection.disconnectSync();
@@ -2823,6 +2859,10 @@ async function ensureTableFromJson(connection, tableName, filePath) {
 }
 
 async function loadWallPostsToDb(filePath, tableName, jsonResp) {
+    if (!jsonResp?.length) {
+        console.log(`Successfully loaded 0 rows into table "${tableName}"`);
+        return 0;
+    }
     connection = await instance.connect();
     const duckPath = duckDbJsonPath(filePath);
     try {
@@ -2836,6 +2876,10 @@ async function loadWallPostsToDb(filePath, tableName, jsonResp) {
         or cast(wp.postedAt as timestamp) > (
             select coalesce(max(cast(postedAt as timestamp)), current_localtimestamp() - interval '99' year)
                 from ${tableName} where json_extract_string(author, '$.id') = json_extract_string(wp.author, '$.id'))
+        or not exists (
+            select 1 from ${tableName} t
+            where cast(t.id as bigint) = cast(wp.id as bigint)
+              and json_extract_string(t.author, '$.id') = json_extract_string(wp.author, '$.id'))
 		RETURNING 1
         ;`;
         reader = await connection.runAndReadAll(insertTableSql);
@@ -2949,7 +2993,6 @@ async function scrollDnWall() {
 async function scrapeChatMessages() {
     let needToScrollUp = true;
     let idleScrolls = 0;
-    let consecutiveZeroInserts = 0;
     runDatetime = new Date();
     const enqueueChatBatch = createBatchQueue();
     const chatUserId = getAuthorIdFromCreds();
@@ -2960,7 +3003,7 @@ async function scrapeChatMessages() {
         console.log(
             `Chat DB bounds for ${chatUserId}: ` +
             `${new Date(chatLowWatermarkMs).toISOString()} .. ${new Date(chatHighWatermarkMs).toISOString()} ` +
-            `(incremental scroll — stop when batch overlaps DB oldest or hasMore=false)`
+            `(incremental scroll — stop when batch newest is older than DB high watermark with no new rows, batch reaches DB oldest, or hasMore=false)`
         );
     } else {
         console.log(`No existing chat messages for ${chatUserId}; scrolling until hasMore=false.`);
@@ -2972,6 +3015,17 @@ async function scrapeChatMessages() {
             console.log('Chat API hasMore=false; stopping scroll.');
             needToScrollUp = false;
         } else if (
+            chatHighWatermarkMs != null &&
+            batchMaxMs != null &&
+            batchMaxMs < chatHighWatermarkMs &&
+            insertCount === 0
+        ) {
+            console.log(
+                `Batch newest ${new Date(batchMaxMs).toISOString()} ` +
+                `is older than DB high watermark ${new Date(chatHighWatermarkMs).toISOString()} with no new rows; stopping chat scroll.`
+            );
+            needToScrollUp = false;
+        } else if (
             chatLowWatermarkMs != null &&
             batchMaxMs != null &&
             batchMaxMs <= chatLowWatermarkMs
@@ -2981,24 +3035,6 @@ async function scrapeChatMessages() {
                 `<= DB oldest ${new Date(chatLowWatermarkMs).toISOString()}; stopping incremental scroll.`
             );
             needToScrollUp = false;
-        } else if (
-            insertCount === 0 &&
-            chatLowWatermarkMs != null &&
-            chatHighWatermarkMs != null &&
-            batchMinMs != null &&
-            batchMaxMs != null &&
-            batchMinMs >= chatLowWatermarkMs &&
-            batchMaxMs <= chatHighWatermarkMs
-        ) {
-            consecutiveZeroInserts += 1;
-            if (consecutiveZeroInserts >= 2) {
-                console.log('Two consecutive in-range duplicate batches; stopping scroll.');
-                needToScrollUp = false;
-            }
-        } else if (insertCount > 0) {
-            consecutiveZeroInserts = 0;
-        } else {
-            consecutiveZeroInserts = 0;
         }
     }
 
@@ -3081,11 +3117,64 @@ async function scrapeWallPosts() {
 let needToScrollDn = true;
     let scrollCount = 0;
     let idleScrolls = 0;
-    let highWatermarkMs = null;
     const enqueueWallBatch = createBatchQueue();
     const authorId = getAuthorIdFromCreds();
     const wallMinPostedAtMs = getWallScrapeMinPostedAtMs();
     const wallMaxAgeDays = process.env.wall_scrape_max_age_days || '730';
+
+    logStep('Reading wall postedAt bounds from DuckDB (before navigation)...');
+    console.log(
+        `Wall scrape window: postedAt >= ${new Date(wallMinPostedAtMs).toISOString()} ` +
+        `(wall_scrape_max_age_days=${wallMaxAgeDays})`
+    );
+    const wallBounds = await getWallPostedAtBoundsMs(authorId, wallMinPostedAtMs);
+    const wallLowWatermarkMs = wallBounds.minMs;
+    const wallHighWatermarkMs = wallBounds.maxMs;
+    if (wallLowWatermarkMs != null && wallHighWatermarkMs != null) {
+        let boundsMsg =
+            `Wall DB bounds for ${authorId} (within ${wallMaxAgeDays}-day window): ` +
+            `${new Date(wallLowWatermarkMs).toISOString()} .. ${new Date(wallHighWatermarkMs).toISOString()} ` +
+            `[${wallBounds.windowCount} posts`;
+        if (wallBounds.totalCount > wallBounds.windowCount) {
+            boundsMsg += `; ${wallBounds.totalCount} total in DB, oldest abs ${new Date(wallBounds.absMinMs).toISOString()} outside window`;
+        }
+        boundsMsg += `] (scroll down until batch is older than DB high watermark with no new rows, 730-day cutoff, or hasMore=false)`;
+        console.log(boundsMsg);
+    } else if (wallBounds.totalCount > 0) {
+        console.log(
+            `Wall DB has ${wallBounds.totalCount} posts for ${authorId} but none within ${wallMaxAgeDays}-day window; ` +
+            `scrolling until cutoff or hasMore=false.`
+        );
+    } else {
+        console.log(`No existing wall posts for author ${authorId}; scrolling until cutoff or hasMore=false.`);
+    }
+
+    function evaluateWallBatchStop(jsonResponse, trimmed, list, insertCount) {
+        const inWindow = list?.length ? list : [];
+        const { minMs: batchMinMs } = getBatchMinMaxPostedAtMs(trimmed);
+        const { maxMs: batchMaxMs } = getBatchMinMaxPostedAtMs(inWindow.length ? inWindow : trimmed);
+        if (!jsonResponse['hasMore']) {
+            console.log('Wall API hasMore=false; stopping scroll.');
+            needToScrollDn = false;
+        } else if (batchMinMs != null && batchMinMs < wallMinPostedAtMs) {
+            console.log(
+                `Batch oldest postedAt ${new Date(batchMinMs).toISOString()} ` +
+                `is before ${wallMaxAgeDays}-day cutoff ${new Date(wallMinPostedAtMs).toISOString()}; stopping wall scroll.`
+            );
+            needToScrollDn = false;
+        } else if (
+            wallHighWatermarkMs != null &&
+            batchMaxMs != null &&
+            batchMaxMs < wallHighWatermarkMs &&
+            insertCount === 0
+        ) {
+            console.log(
+                `Batch newest ${new Date(batchMaxMs).toISOString()} ` +
+                `is older than DB high watermark ${new Date(wallHighWatermarkMs).toISOString()} with no new rows; stopping wall scroll.`
+            );
+            needToScrollDn = false;
+        }
+    }
 
     const onWallResponse = async (response) => {
         const url = response.url();
@@ -3096,34 +3185,26 @@ let needToScrollDn = true;
                 const trimmed = trimWallPostListForDb(jsonResponse['list'] || []);
                 const { minMs: batchMinMs, maxMs: batchMaxMs } = getBatchMinMaxPostedAtMs(trimmed);
                 const list = filterWallPostsByMinPostedAt(trimmed, wallMinPostedAtMs);
-                console.log(`Wall API batch: ${trimmed.length} posts (${list.length} within ${wallMaxAgeDays}-day window)`);
+                console.log(
+                    `Wall API batch: ${trimmed.length} posts (${list.length} within ${wallMaxAgeDays}-day window)` +
+                    (batchMaxMs != null ? `, newest ${new Date(batchMaxMs).toISOString()}` : '') +
+                    (batchMinMs != null ? `, oldest ${new Date(batchMinMs).toISOString()}` : '')
+                );
                 idleScrolls = 0;
-                const batchPath = path.join(homeDirectory, 'data', `api_out_wall_${Date.now()}.json`);
-                writeJsonFileAtomic(batchPath, list);
-                const batchStart = Date.now();
-                insertCount = await loadWallPostsToDb(batchPath, 'stg_wall_posts', list);
-                logStep(`Wall batch loaded ${insertCount} rows in ${((Date.now() - batchStart) / 1000).toFixed(1)}s`);
-                try { fs.unlinkSync(batchPath); } catch (_) {}
-
-                if (!jsonResponse['hasMore']) {
-                    console.log('Wall API hasMore=false; stopping scroll.');
-                    needToScrollDn = false;
-                } else if (batchMinMs != null && batchMinMs < wallMinPostedAtMs) {
-                    console.log(
-                        `Batch oldest postedAt ${new Date(batchMinMs).toISOString()} ` +
-                        `is before ${wallMaxAgeDays}-day cutoff ${new Date(wallMinPostedAtMs).toISOString()}; stopping wall scroll.`
-                    );
-                    needToScrollDn = false;
-                } else if (highWatermarkMs != null && batchMaxMs != null && batchMaxMs <= highWatermarkMs) {
-                    console.log(
-                        `Batch max postedAt ${new Date(batchMaxMs).toISOString()} ` +
-                        `<= high watermark ${new Date(highWatermarkMs).toISOString()}; stopping incremental scroll.`
-                    );
-                    needToScrollDn = false;
-                } else if (highWatermarkMs != null && insertCount === 0) {
-                    console.log('No new wall posts in batch; stopping scroll.');
-                    needToScrollDn = false;
+                let insertCount = 0;
+                if (list.length > 0) {
+                    const batchPath = path.join(homeDirectory, 'data', `api_out_wall_${Date.now()}.json`);
+                    writeJsonFileAtomic(batchPath, list);
+                    const batchStart = Date.now();
+                    insertCount = await loadWallPostsToDb(batchPath, 'stg_wall_posts', list);
+                    logStep(`Wall batch loaded ${insertCount} rows in ${((Date.now() - batchStart) / 1000).toFixed(1)}s`);
+                    try { fs.unlinkSync(batchPath); } catch (_) {}
+                } else {
+                    console.log('Successfully loaded 0 rows into table "stg_wall_posts"');
+                    logStep('Wall batch loaded 0 rows in 0.0s');
                 }
+
+                evaluateWallBatchStop(jsonResponse, trimmed, list, insertCount);
             });
         } catch (error) {
             console.error('Error parsing JSON from response:', error);
@@ -3135,18 +3216,11 @@ let needToScrollDn = true;
         await navigateScrapeTarget(process.env.wall_profile, 'wall profile', 'wall_profile', {
             blockOyfHome: true,
         });
-        logStep('Wall profile loaded; reading high watermark from DuckDB...');
-        console.log(
-            `Wall scrape window: postedAt >= ${new Date(wallMinPostedAtMs).toISOString()} ` +
-            `(wall_scrape_max_age_days=${wallMaxAgeDays})`
-        );
-        highWatermarkMs = await getWallPostedAtHighWatermarkMs(authorId);
-        if (highWatermarkMs != null) {
-            console.log(`Wall high watermark max(postedAt) for author ${authorId}: ${new Date(highWatermarkMs).toISOString()}`);
+        if (needToScrollDn) {
+            logStep('Wall profile loaded; starting scroll for older posts...');
         } else {
-            console.log(`No existing wall posts for author ${authorId}; scrolling until cutoff or hasMore=false.`);
+            logStep('Wall profile loaded; scroll not needed (stop condition met during landing batches).');
         }
-        needToScrollDn = true;
         while (needToScrollDn && scrollCount < 500) {
             await scrollDnWall();
             scrollCount += 1;
