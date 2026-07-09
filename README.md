@@ -95,6 +95,8 @@ purchases_scrape_force_backfill=0
 
 Control which creator is scraped by setting the active `chat_thread` and `wall_profile` lines. Run **one author at a time**.
 
+**Scrape time window:** set `wall_scrape_max_age_days` in `data/config.env` (default **730** ≈ 2 years). **One key** controls scroll bounds and the oldest-batch cutoff for **wall**, **chat**, and **purchases** — there are no separate chat/purchases keys. Example: `wall_scrape_max_age_days=365` limits scraping to the last year. Change the value, save `config.env`, then run the scraper again. Rows already in `web.db` that are older than the new window are **not** deleted automatically.
+
 **Comment lines:** `web_scrape.js` uses `loadConfigEnv()` which skips blank lines and lines starting with `#` or `//` before parsing. Comment out inactive authors with `//` (or `#`) so only the active URLs are loaded into `process.env`.
 
 **Switch author (one-click):** `local_run/local_setup/set_config_author.ps1` uncomments the matching `chat_thread` + `wall_profile` pair for an `author_id` and comments out all other author pairs. Writes `data/config.env.bak` before updating.
@@ -591,6 +593,7 @@ WHERE json_extract_string(cm.fromUser, '$.id') = '253745725'
 | `TimeoutError: Timed out after waiting` at launch | **nav-v47+** kills zombie Chromium after each failed attempt. Close stuck Puppeteer windows; log should show `Chromium executable: ...\.cache\puppeteer\...` |
 | Page loads only after focusing/restoring Chromium | Chromium throttles background/occluded windows on Windows. Script uses anti-throttle launch flags and one-time `focusScrapeWindow()` before initial login |
 | `web.db` huge but `COUNT(*)` on `media_dim_history` is small | Prune `DELETE`s are logical only; run `.\data\scripts\compact_web_db.ps1` with scraper/CLI stopped. Run `node .\data\scripts\analyze_web_db.js --deep` to compare logical row counts vs on-disk segments. Copying `web.db` without its `.wal` can show stale row counts until checkpointed |
+| Multiple **Enter** presses to close a PS1 window | Several scripts end with `Read-Host` so a double-clicked console stays open. **Stacked prompts:** `scrape_chat.ps1` / `scrape_wall.ps1` call `run_media_origin_tracker_by_days.ps1`, which **always** prompts in a `finally` block; the parent prompts again **only on failure** — so a failed tracker after a successful scrape needs **two** Enters. **Early Enter:** a keypress while Node/DuckDB output is still streaming may not reach the prompt; wait for `Press Enter to…` before pressing. **Integrated terminal:** `set_config_force_backfill.ps1` skips the prompt when stdin is redirected; other scripts may still prompt |
 
 Errors are also written to `logs/error_log_<timestamp>.log`.
 
