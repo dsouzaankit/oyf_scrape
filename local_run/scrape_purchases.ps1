@@ -49,7 +49,7 @@ try {
         return
     }
 
-    $trackerScript = Join-Path $HomeDirectory 'sql_script\run_media_origin_tracker_by_days.ps1'
+    $trackerScript = Join-Path $HomeDirectory 'sql_script\run_media_origin_tracker_by_days_purchases.ps1'
     if (-not (Test-Path -LiteralPath $trackerScript)) {
         throw "Tracker script not found: $trackerScript"
     }

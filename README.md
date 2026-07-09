@@ -184,7 +184,7 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_u
 |----------|------|
 | `local_run/scrape_chat.ps1` | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
 | `local_run/scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
-| `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
+| `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases`; then `run_media_origin_tracker_by_days_purchases.ps1` |
 | `local_run/local_setup/add_config_author.ps1` | Interactive add author URLs + create `set_config_author_<author_id>.ps1` |
 | `local_run/local_setup/set_config_author.ps1` | Activate one author in `data/config.env` (`chat_thread` + `wall_profile` pair) |
 | `local_run/local_setup/set_config_force_backfill.ps1` | Toggle `wall_scrape_force_backfill`, `chat_scrape_force_backfill`, and `purchases_scrape_force_backfill` (disable high-watermark stop for gap backfill; chat/wall also enable `expired_ts` sweep on full API pass) |
@@ -338,7 +338,24 @@ Built-in optional filters (edit CTEs in the SQL file, or let PS1 inject values):
 | `origin_days_filter` | `approx_origin_date` within last N days (`null` = no limit) |
 | `unlocked_media` | Always excludes `media_id` values present in `stg_chat_unlocks` |
 
-### PowerShell launchers
+### Purchases / unlocked media origin
+
+**SQL:** `sql_script/media_origin_date_tracker_multi_author_purchases.sql` — same wall-band `approx_origin_date` logic, but sources **`stg_chat_unlocks`** (purchased media). Output: `unlock_id`, `unlock_date`, `media_id`, `media_duration`, `msg_price`, `duration_ratio`, `approx_origin_date`.
+
+**Note:** `last_n_days` filters on **`approx_origin_date`** (estimated wall-post date), not `unlock_date` (when you purchased). Use `-Days 365` or edit `origin_days_filter` in the SQL if recent unlocks have older wall origins.
+
+| Script | Description |
+|--------|-------------|
+| `sql_script/run_media_origin_tracker_by_days_purchases.ps1` | Unlocked media for **30, 60, 90, 180, 365**-day `approx_origin_date` windows |
+
+```powershell
+.\sql_script\run_media_origin_tracker_by_days_purchases.ps1
+.\sql_script\run_media_origin_tracker_by_days_purchases.ps1 -Days 365
+```
+
+`scrape_purchases.ps1` runs this tracker after a successful purchases scrape.
+
+### PowerShell launchers (chat media)
 
 | Script | Description |
 |--------|-------------|
@@ -681,7 +698,9 @@ web_scrape/
   sql_script/
     run_media_origin_tracker.ps1       # single media-origin report
     run_media_origin_tracker_by_days.ps1  # report for 30/60/90/180/365-day windows
+    run_media_origin_tracker_by_days_purchases.ps1  # unlocked media origin (stg_chat_unlocks)
     media_origin_date_tracker_multi_author.sql
+    media_origin_date_tracker_multi_author_purchases.sql
   dbt/
     profiles.example.yml
     webDataELT/
