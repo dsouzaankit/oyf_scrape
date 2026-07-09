@@ -1,5 +1,5 @@
-# Toggle wall_scrape_force_backfill and chat_scrape_force_backfill in data/config.env.
-# When enabled (1), wall/chat scrape skip the high-watermark early stop and scroll
+# Toggle wall/chat/purchases scrape_force_backfill in data/config.env.
+# When enabled (1), wall/chat/purchases scrape skip the high-watermark early stop and scroll
 # maiden-style for gap backfill (until 730-day cutoff or hasMore=false).
 #
 # Usage:
@@ -7,7 +7,7 @@
 #   .\set_config_force_backfill.ps1 -Disable
 #   .\set_config_force_backfill.ps1 -Toggle
 #   .\set_config_force_backfill.ps1 -Status
-#   .\set_config_force_backfill.ps1                    # interactive
+#   .\set_config_force_backfill.ps1                    # toggle (default)
 #
 # Location: local_run\local_setup\
 
@@ -24,7 +24,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$KeyNames = @('wall_scrape_force_backfill', 'chat_scrape_force_backfill')
+$KeyNames = @('wall_scrape_force_backfill', 'chat_scrape_force_backfill', 'purchases_scrape_force_backfill')
 
 if (-not $configPath) {
     $configPath = Join-Path $HomeDirectory 'data\config.env'
@@ -127,6 +127,13 @@ function Set-CredsEnvScalarValue {
     return ,@($updated.ToArray())
 }
 
+function Wait-EnterToClose {
+    if ($Host.Name -eq 'ConsoleHost' -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+        Write-Host ''
+        Read-Host 'Press Enter to close'
+    }
+}
+
 if (-not (Test-Path -LiteralPath $configPath)) {
     throw "config.env not found: $configPath"
 }
@@ -137,7 +144,8 @@ foreach ($key in $KeyNames) {
     $val = Get-CredsEnvScalarValue -Rows $envLines -Key $key
     $currentStates[$key] = Test-CredsEnvTruthy -Value $val
 }
-$currentlyEnabled = ($currentStates.Values | Where-Object { $_ }).Count -eq $KeyNames.Count
+$enabledCount = @($currentStates.Values | Where-Object { $_ }).Count
+$currentlyEnabled = $enabledCount -eq $KeyNames.Count
 
 if ($Status) {
     Write-Host "config.env: $configPath"
@@ -145,34 +153,16 @@ if ($Status) {
         $state = if ($currentStates[$key]) { 'enabled (1)' } else { 'disabled (0 or unset)' }
         Write-Host "${key}: $state"
     }
+    Wait-EnterToClose
     return
 }
-
-$targetEnabled = $null
 if ($Enable) { $targetEnabled = $true }
 elseif ($Disable) { $targetEnabled = $false }
-elseif ($Toggle) { $targetEnabled = -not $currentlyEnabled }
 else {
+    $targetEnabled = -not $currentlyEnabled
     Write-Host "config.env: $configPath"
-    foreach ($key in $KeyNames) {
-        $state = if ($currentStates[$key]) { 'enabled' } else { 'disabled' }
-        Write-Host "Current ${key}: $state"
-    }
-    Write-Host 'Enable maiden-style wall/chat gap backfill (disable high-watermark stop)? [y/N]'
-    $answer = (Read-Host 'Enter y/yes to enable, n/no to disable, or blank to cancel').Trim().ToLowerInvariant()
-    if ($answer -eq '') {
-        Write-Host 'No changes.'
-        return
-    }
-    if ($answer -in @('y', 'yes', '1', 'true', 'on')) {
-        $targetEnabled = $true
-    }
-    elseif ($answer -in @('n', 'no', '0', 'false', 'off')) {
-        $targetEnabled = $false
-    }
-    else {
-        throw "Unrecognized answer: $answer"
-    }
+    $verb = if ($targetEnabled) { 'Enabling' } else { 'Disabling' }
+    Write-Host "$verb force backfill for wall, chat, and purchases..."
 }
 
 $newValue = if ($targetEnabled) { '1' } else { '0' }
@@ -181,13 +171,20 @@ foreach ($key in $KeyNames) {
     if ($currentStates[$key] -ne $targetEnabled) { $allMatch = $false; break }
 }
 if ($allMatch) {
-    Write-Host "Force backfill already $($newValue) for wall and chat in $configPath"
+    Write-Host "Force backfill already $($newValue) for wall, chat, and purchases in $configPath"
+    Wait-EnterToClose
     return
 }
 
 $updated = $envLines
 foreach ($key in $KeyNames) {
-    $insertAfter = if ($key -eq 'chat_scrape_force_backfill') { 'wall_scrape_force_backfill' } else { 'wall_scrape_max_age_days' }
+    $insertAfter = if ($key -eq 'chat_scrape_force_backfill') {
+        'wall_scrape_force_backfill'
+    } elseif ($key -eq 'purchases_scrape_force_backfill') {
+        'chat_scrape_force_backfill'
+    } else {
+        'wall_scrape_max_age_days'
+    }
     $updated = Set-CredsEnvScalarValue -Rows $updated -Key $key -Value $newValue -InsertAfterKey $insertAfter
 }
 
@@ -198,6 +195,7 @@ foreach ($key in $KeyNames) {
 
 if ($WhatIf) {
     Write-Host 'WhatIf: no file changes written.'
+    Wait-EnterToClose
     return
 }
 
@@ -205,3 +203,4 @@ $backupPath = "$configPath.bak"
 Copy-Item -LiteralPath $configPath -Destination $backupPath -Force
 Set-Content -LiteralPath $configPath -Value $updated -Encoding utf8
 Write-Host "backup:    $backupPath"
+Wait-EnterToClose

@@ -86,6 +86,7 @@ media_dim_history_retain_runs=5
 wall_scrape_max_age_days=730
 wall_scrape_force_backfill=0
 chat_scrape_force_backfill=0
+purchases_scrape_force_backfill=0
 
 # alternate author (ignored)
 // chat_thread=https://...com/my/chats/chat/<other_author_id>
@@ -108,9 +109,10 @@ Scripts live under `local_run/local_setup/`.
 & '.\local_run\local_setup\set_config_author.ps1' -List
 & '.\local_run\local_setup\set_config_author.ps1' -AuthorId 180951488
 & '.\local_run\local_setup\set_config_author.ps1'                    # interactive menu
-& '.\local_run\local_setup\set_config_force_backfill.ps1' -Enable    # maiden-style wall/chat gap backfill
+& '.\local_run\local_setup\set_config_force_backfill.ps1' -Enable    # maiden-style wall/chat/purchases gap backfill
 & '.\local_run\local_setup\set_config_force_backfill.ps1' -Disable   # default incremental stop
 & '.\local_run\local_setup\set_config_force_backfill.ps1' -Status
+& '.\local_run\local_setup\set_config_force_backfill.ps1'            # toggle all three keys (default)
 ```
 
 **One-click per author:**
@@ -183,7 +185,7 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_u
 | `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
 | `local_run/local_setup/add_config_author.ps1` | Interactive add author URLs + create `set_config_author_<author_id>.ps1` |
 | `local_run/local_setup/set_config_author.ps1` | Activate one author in `data/config.env` (`chat_thread` + `wall_profile` pair) |
-| `local_run/local_setup/set_config_force_backfill.ps1` | Toggle `wall_scrape_force_backfill` and `chat_scrape_force_backfill` (disable high-watermark stop for gap backfill) |
+| `local_run/local_setup/set_config_force_backfill.ps1` | Toggle `wall_scrape_force_backfill`, `chat_scrape_force_backfill`, and `purchases_scrape_force_backfill` (disable high-watermark stop for gap backfill) |
 | `local_run/local_setup/set_config_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
 | `data/scripts/compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
 | `sql_script/open_web_db.ps1` | DuckDB CLI: attach `data/web.db` as schema `web` (write when possible; `-ReadOnly` to force) |
@@ -359,6 +361,7 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-ConfigPath`, `-DuckDb
 - **Or** when the message/post `id` is not already in the table (gap-fill inside the existing time range).
 - Chat: `NOT EXISTS` on `id` only (one thread per scrape).
 - Wall: `NOT EXISTS` on `(author.id, id)`.
+- Purchases: `NOT EXISTS` on `id` (account-wide unlock feed).
 
 **Wall scroll stop** (scroll **down**, API `publish_date_desc` — newest batch first):
 
@@ -374,17 +377,20 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-ConfigPath`, `-DuckDb
 5. **No low-watermark stop** — once scrolling starts, it is **not** stopped merely because the batch is below DB `min(postedAt)`; scroll continues toward the 730-day cutoff unless rule 4 applies.
 6. **Maiden author** (no rows for `author.id`): high watermark is null — rule 4 does not apply; scroll continues until cutoff or `hasMore=false`.
 7. **Keep scrolling** when `insertCount > 0` (new or gap-fill rows), even if batch newest is below the high watermark.
+8. **Safety cap** — 500 scroll iterations per run.
 
 **Typical caught-up incremental run:** API returns the latest posts first. Landing batches have `batchMax < dbMax`, all IDs already in DB (`insertCount === 0`) → high-watermark stop fires immediately; no scroll loop.
 
-**Gap backfill tradeoff:** High-watermark stop at the top can end the run **before** scrolling to older pages below DB `min` (e.g. missing posts between DB oldest and the 730-day cutoff). Those gaps insert via `postedAt < min` only if a run reaches those API batches (`insertCount > 0` prevents early stop). For a full history sweep within the window, set `wall_scrape_force_backfill=1` and/or `chat_scrape_force_backfill=1` in `config.env` (or `& '.\local_run\local_setup\set_config_force_backfill.ps1' -Enable` to set both).
+**Gap backfill tradeoff:** High-watermark stop at the top can end the run **before** scrolling to older pages below DB `min` (e.g. missing posts between DB oldest and the 730-day cutoff). Those gaps insert via `postedAt < min` only if a run reaches those API batches (`insertCount > 0` prevents early stop). For a full history sweep within the window, set `wall_scrape_force_backfill=1`, `chat_scrape_force_backfill=1`, and/or `purchases_scrape_force_backfill=1` in `config.env` (or `& '.\local_run\local_setup\set_config_force_backfill.ps1' -Enable` to set all three).
 
 | `wall_scrape_force_backfill` | `0` (default) — incremental; stop when batch newest &lt; DB high watermark with no new rows |
 | `wall_scrape_force_backfill` | `1` — skip high-watermark stop; scroll for gap backfill until cutoff or `hasMore=false` |
 | `chat_scrape_force_backfill` | `0` (default) — incremental; stop when batch newest &lt; DB high watermark with no new rows |
 | `chat_scrape_force_backfill` | `1` — skip high-watermark stop; scroll for gap backfill until 730-day cutoff or `hasMore=false` |
+| `purchases_scrape_force_backfill` | `0` (default) — incremental; stop when batch newest &lt; DB high watermark with no new rows |
+| `purchases_scrape_force_backfill` | `1` — skip high-watermark stop; scroll for gap backfill until 730-day cutoff or `hasMore=false` |
 
-**Note:** `730` in `wall_scrape_max_age_days` is a **day count** (time window), not a row count. Logged post count (e.g. `260 posts`) is unrelated.
+**Note:** `730` in `wall_scrape_max_age_days` is a **day count** (time window), not a row count. Logged post count (e.g. `260 posts`) is unrelated. The same window applies to **chat** and **purchases** (`createdAt`).
 
 ### Scalability at 1M+ rows (not implemented)
 
@@ -394,9 +400,9 @@ The scraper is tuned for **incremental** loads at typical scale: hundreds–low 
 
 | Operation | When | Cost at 1M+ |
 |-----------|------|-------------|
-| `getWallPostedAtBoundsMs` / `getChatCreatedAtBoundsMs` | Once per scrape (before scroll) | Full scan / aggregate on `stg_*` (wall uses `author.id`; chat may scan whole table if no `chatUserId` column) |
+| `getWallPostedAtBoundsMs` / `getChatCreatedAtBoundsMs` / `getChatUnlocksCreatedAtBoundsMs` | Once per scrape (before scroll) | Full scan / aggregate on `stg_*` (wall uses `author.id`; chat may scan whole table if no `chatUserId` column; purchases is account-wide on `createdAt`) |
 | `loadWallPostsToDb` / `loadChatToDb` | Every API batch (~10–50 rows) | **Per incoming row:** two correlated `min`/`max` subqueries + one `NOT EXISTS` ID probe |
-| `loadChatUnlocksToDb` | Purchases batches | Per-row `min`/`max` only (no ID dedup) |
+| `loadChatUnlocksToDb` | Purchases batches | Per-row `min`/`max` + `NOT EXISTS` ID dedup |
 | `refreshSrcMediaDim` + `updateMediaDimHist` | After chat batches with inserts | Scales with batch media IDs + history table size (separate from wall) |
 
 Insert SQL pattern (wall example — chat is analogous on `createdAt` / `fromUser`):
@@ -420,7 +426,7 @@ Monitor growth: `node data/scripts/analyze_web_db.js` (read-only; safe during sc
 
 #### Refactor roadmap (priority)
 
-**1. Bind watermarks from JS (lowest effort)** — bounds are already computed before scroll (`getWallPostedAtBoundsMs`, `getChatCreatedAtBoundsMs`). Pass `minMs` / `maxMs` as SQL literals in the `INSERT … SELECT` instead of per-row subqueries. Scroll-stop and insert logic stay in sync; removes ~2× table scans per batch row.
+**1. Bind watermarks from JS (lowest effort)** — bounds are already computed before scroll (`getWallPostedAtBoundsMs`, `getChatCreatedAtBoundsMs`, `getChatUnlocksCreatedAtBoundsMs`). Pass `minMs` / `maxMs` as SQL literals in the `INSERT … SELECT` instead of per-row subqueries. Scroll-stop and insert logic stay in sync; removes ~2× table scans per batch row.
 
 **2. Batch-scoped ID anti-join (medium)** — one lookup for the whole batch instead of `NOT EXISTS` per row:
 
@@ -473,11 +479,13 @@ None of the above is implemented in `web_scrape.js` today; the correlated-subque
    - batch newest **within the window** is **strictly older than** DB **high watermark** (`max(createdAt)` in the window) **and** `insertCount === 0` — **skipped** when `chat_scrape_force_backfill=1`
 4. **No low-watermark stop** — scroll is **not** stopped merely because the batch is below DB `min(createdAt)`; scroll continues toward the 730-day cutoff unless rule 3 applies.
 5. **Keep scrolling** when `insertCount > 0` (new or gap-fill rows), even if batch newest is below the high watermark.
-6. No API response after 15 scrolls.
+6. **Safety cap** — 500 scroll iterations per run.
 
 **Typical caught-up incremental chat run:** landing batches are duplicates below DB `max(createdAt)` → high-watermark stop fires immediately (unless force backfill).
 
 **Maiden chat** (no rows / null bounds): high watermark stop does not apply; scroll continues until cutoff or `hasMore=false`.
+
+**Purchases scroll stop** (scroll **down**, `/posts/paid/chat`): same rules as wall/chat on account-wide `stg_chat_unlocks` (`createdAt`, `getChatUnlocksCreatedAtBoundsMs`). **`insertCount`** + ID dedup on `id`. Stops on `hasMore=false`, 730-day cutoff, high watermark (unless `purchases_scrape_force_backfill=1`), or 500-scroll safety cap. No low-watermark stop.
 
 **Media dimension** (`refreshSrcMediaDim` + `updateMediaDimHist`) runs after each chat batch and recalculates SCD Type 2 history for media IDs in that batch. Only batch-affected rows are appended to `media_dim_history`; older runs are pruned to the last **N** distinct `extract_ts` values (`media_dim_history_retain_runs` in `config.env`, default **5**).
 
@@ -494,9 +502,11 @@ Prune groups by **`extract_ts`** (one timestamp per chat scrape session, shared 
 
 ## DuckDB concurrency
 
+- **One scrape at a time** on the default data root (`P:\all_scripts\oyf_scrape`): shared `web.db`, `config.env`, Chrome profile, and `api_out.json` — do not run two `scrape_*.ps1` processes together.
 - **Scraper writing:** do not open `web.db` for writes in DuckDB CLI while `web_scrape.js` is running.
 - **Reporting scripts:** `run_media_origin_tracker*.ps1` use `-readonly` by default and can run alongside the scraper.
 - Only one `DuckDBInstance.create(dbPath)` per Node process.
+- **Parallel scrapes (advanced):** only with separate `WEB_SCRAPE_HOME` **and** separate `chrome_user_data_dir` per process (one author + one mode each). Not a supported default workflow.
 
 ## Database maintenance
 
@@ -600,7 +610,7 @@ web_scrape/
     local_setup/
       add_config_author.ps1             # interactive add author + one-click script
       set_config_author.ps1             # switch active author in config.env
-      set_config_force_backfill.ps1      # toggle wall/chat scrape_force_backfill
+      set_config_force_backfill.ps1      # toggle wall/chat/purchases scrape_force_backfill
       set_config_author_180951488.ps1   # one-click activate author_id 180951488
       set_config_author_253745725.ps1   # one-click activate author_id 253745725
       set_config_author_24569249.ps1   # one-click activate author_id 24569249
