@@ -13,6 +13,7 @@ select id chat_id
 , date(cast(createdAt as timestamp)) created_date
 , unnest(media) media
 from stg_chat_messages
+where expired_ts is null
 )
 , t1 as (
 select chat_id, author_id
@@ -32,6 +33,7 @@ select json_extract_string(author, '$.id') author_id
 , date(cast(postedAt as timestamp)) posted_date
 , unnest(media) media
 from stg_wall_posts
+where expired_ts is null
 )
 , t22 as (
 select author_id

@@ -57,6 +57,7 @@ select id chat_id
 , unnest(media) media
 from stg_chat_messages
 where json_extract_string(fromUser, '$.id') is not null
+and expired_ts is null
 )
 , t1 as (
 select chat_id, author_id, msg_text
@@ -77,6 +78,7 @@ select json_extract_string(author, '$.id') author_id
 , unnest(media) media
 from stg_wall_posts
 where json_extract_string(author, '$.id') is not null
+and expired_ts is null
 )
 , t22 as (
 select author_id

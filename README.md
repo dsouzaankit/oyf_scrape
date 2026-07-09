@@ -187,7 +187,7 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_u
 | `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases` (tees to `logs/scrape_purchases_*.log`) |
 | `local_run/local_setup/add_config_author.ps1` | Interactive add author URLs + create `set_config_author_<author_id>.ps1` |
 | `local_run/local_setup/set_config_author.ps1` | Activate one author in `data/config.env` (`chat_thread` + `wall_profile` pair) |
-| `local_run/local_setup/set_config_force_backfill.ps1` | Toggle `wall_scrape_force_backfill`, `chat_scrape_force_backfill`, and `purchases_scrape_force_backfill` (disable high-watermark stop for gap backfill) |
+| `local_run/local_setup/set_config_force_backfill.ps1` | Toggle `wall_scrape_force_backfill`, `chat_scrape_force_backfill`, and `purchases_scrape_force_backfill` (disable high-watermark stop for gap backfill; chat/wall also enable `expired_ts` sweep on full API pass) |
 | `local_run/local_setup/set_config_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
 | `data/scripts/compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
 | `sql_script/open_web_db.ps1` | DuckDB CLI: attach `data/web.db` as schema `web` (write when possible; `-ReadOnly` to force) |
@@ -324,6 +324,8 @@ Maps chat `media_id` to an approximate wall-post date (`approx_origin_date`) by 
 
 **Inspect one media_id:** uncomment `media_id_filter` in the SQL file, e.g. `select unnest([4458229438::bigint]) as media_id`, then run `run_media_origin_tracker.ps1`.
 
+**Expired messages:** rows with `expired_ts` set (after chat/wall force backfill) are excluded from the report and from wall-post interval bands. See **Who uses `expired_ts`** under incremental load logic.
+
 **SQL:** `sql_script/media_origin_date_tracker_multi_author.sql`
 
 Built-in optional filters (edit CTEs in the SQL file, or let PS1 inject values):
@@ -375,7 +377,7 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-ConfigPath`, `-DuckDb
 
 **`insertCount`** — rows actually inserted by DuckDB (`INSERT … RETURNING 1` row count). `0` means the batch was all duplicates / filtered out; scroll-stop rules use this value.
 
-1. **Before navigation** — `getWallPostedAtBoundsMs(author, cutoff)` reads `min`/`max` `postedAt` for the author **only where** `postedAt >= now - wall_scrape_max_age_days` (default **730** days / ~2 years). `min` is logged only (not used to stop scroll). `max` is the **high watermark** for scroll-stop.
+1. **Before navigation** — `getWallPostedAtBoundsMs(author, cutoff)` reads `min`/`max` `postedAt` for the author **only where** `postedAt >= now - wall_scrape_max_age_days` (default **730** days / ~2 years) **and** `expired_ts IS NULL`. `min` is logged only (not used to stop scroll). `max` is the **high watermark** for scroll-stop.
 2. **Landing batches** — API responses during profile load are processed like scroll batches. If a stop condition is met before navigation finishes, the scroll loop is **not** restarted.
 3. **Per batch** — only posts inside the window are inserted (`filterWallPostsByMinPostedAt`). Inserts also gap-fill via timestamp (`postedAt` &lt; min or &gt; max) and ID dedup (`NOT EXISTS` on `author.id` + `id`).
 4. **Stop when** any of:
@@ -397,6 +399,21 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-ConfigPath`, `-DuckDb
 | `chat_scrape_force_backfill` | `1` — skip high-watermark stop; scroll for gap backfill until 730-day cutoff or `hasMore=false` |
 | `purchases_scrape_force_backfill` | `0` (default) — incremental; stop when batch newest &lt; DB high watermark with no new rows |
 | `purchases_scrape_force_backfill` | `1` — skip high-watermark stop; scroll for gap backfill until 730-day cutoff or `hasMore=false` |
+
+**Force backfill expiration (chat + wall):** when `chat_scrape_force_backfill=1` or `wall_scrape_force_backfill=1` and the run completes a **full API sweep** (`hasMore=false` or 730-day cutoff — not the 500-scroll safety cap), rows in the scrape window that were **not** returned by the API are **soft-deleted**: `expired_ts` is set on `stg_chat_messages` / `stg_wall_posts`. Rows are retained on disk (not physically deleted). Every API batch tracks all returned `id` values (including batches outside the date window). IDs seen again in a later run clear `expired_ts` (`markScrapeIdsActive`). Incremental runs (`force_backfill=0`) never expire rows.
+
+| Column | Table | Meaning |
+|--------|-------|---------|
+| `expired_ts` | `stg_chat_messages`, `stg_wall_posts` | `NULL` = active (API-visible); timestamp = soft-deleted after backfill sweep |
+
+**Who uses `expired_ts`:**
+
+| Consumer | Filters `expired_ts IS NULL`? | Why |
+|----------|-------------------------------|-----|
+| Scroll-stop bounds (`getChatCreatedAtBoundsMs`, `getWallPostedAtBoundsMs`) | **Yes** | High watermark must reflect the newest **API-visible** row. If a withdrawn message still held `max(createdAt)`, incremental runs could think they are caught up and stop early. |
+| Media origin tracker SQL | **Yes** | Report reflects the **current** chat feed and wall bands, not withdrawn promos. |
+| `media_dim` / `media_dim_history` (`refreshSrcMediaDim`) | **No** | Historical ledger — media stays recorded even if the source message was later withdrawn. |
+| `INSERT … NOT EXISTS` dedup | **No** | Expired rows still block duplicate inserts; re-seen API ids revive via `expired_ts = NULL` instead of re-inserting. |
 
 **Note:** `730` in `wall_scrape_max_age_days` is a **day count** (time window), not a row count. Logged post count (e.g. `260 posts`) is unrelated. The same window applies to **chat** and **purchases** (`createdAt`).
 
@@ -479,7 +496,7 @@ None of the above is implemented in `web_scrape.js` today; the correlated-subque
 
 **Chat scroll stop** (scroll **up**, API `order=desc` — newest batch first): after reload, processes one batch at a time (waits for DuckDB load before next scroll). Same rules as wall, adapted for `createdAt` / scroll-up. **`insertCount`** is the DuckDB `INSERT … RETURNING` row count.
 
-1. **Before reload** — `getChatCreatedAtBoundsMs(author, cutoff)` reads `min`/`max` `createdAt` for the sender **only where** `createdAt >= now - wall_scrape_max_age_days` (default **730** days). `min` is logged only (not used to stop scroll). `max` is the **high watermark** for scroll-stop.
+1. **Before reload** — `getChatCreatedAtBoundsMs(author, cutoff)` reads `min`/`max` `createdAt` for the sender **only where** `createdAt >= now - wall_scrape_max_age_days` (default **730** days) **and** `expired_ts IS NULL`. `min` is logged only (not used to stop scroll). `max` is the **high watermark** for scroll-stop.
 2. **Per batch** — only messages inside the window are inserted (`filterChatMessagesByMinCreatedAt`). Inserts also gap-fill via timestamp (`createdAt` &lt; min or &gt; max) and ID dedup.
 3. **Stop when** any of:
    - `hasMore=false`
@@ -495,7 +512,7 @@ None of the above is implemented in `web_scrape.js` today; the correlated-subque
 
 **Purchases scroll stop** (scroll **down**, `/posts/paid/chat`): same rules as wall/chat on account-wide `stg_chat_unlocks` (`createdAt`, `getChatUnlocksCreatedAtBoundsMs`). **`insertCount`** + ID dedup on `id`. Stops on `hasMore=false`, 730-day cutoff, high watermark (unless `purchases_scrape_force_backfill=1`), or 500-scroll safety cap. No low-watermark stop.
 
-**Media dimension** (`refreshSrcMediaDim` + `updateMediaDimHist`) runs after each chat batch and recalculates SCD Type 2 history for media IDs in that batch. Only batch-affected rows are appended to `media_dim_history`; older runs are pruned to the last **N** distinct `extract_ts` values (`media_dim_history_retain_runs` in `config.env`, default **5**).
+**Media dimension** (`refreshSrcMediaDim` + `updateMediaDimHist`) runs after each chat batch and recalculates SCD Type 2 history for media IDs in that batch. **`media_dim` is a historical ledger** — it reads all `stg_chat_messages` rows (including `expired_ts` set) that match the incremental watermark rules. Only batch-affected rows are appended to `media_dim_history`; older runs are pruned to the last **N** distinct `extract_ts` values (`media_dim_history_retain_runs` in `config.env`, default **5**).
 
 Prune groups by **`extract_ts`** (one timestamp per chat scrape session, shared by all scroll batches in that run). When a new scrape introduces a **6th** distinct `extract_ts` (with default `retain_runs=5`), all rows for the oldest `extract_ts` bucket are **deleted**. Earlier scrapes with ≤5 runs keep everything; wall/purchases modes do not touch `media_dim_history`.
 

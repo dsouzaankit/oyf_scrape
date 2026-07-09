@@ -2358,12 +2358,12 @@ async function getChatCreatedAtBoundsMs(chatUserId, minCreatedAtMs) {
     try {
         const schema = await connection.runAndReadAll('DESCRIBE stg_chat_messages');
         const columns = new Set(schema.getRows().map(r => r[0]));
-        let authorWhere = '';
+        let authorWhere = 'WHERE expired_ts IS NULL';
         if (safeId) {
             if (columns.has('chatUserId')) {
-                authorWhere = `WHERE cast(chatUserId as varchar) = '${safeId}'`;
+                authorWhere = `WHERE cast(chatUserId as varchar) = '${safeId}' AND expired_ts IS NULL`;
             } else {
-                authorWhere = `WHERE fromUser.id = cast('${safeId}' AS bigint)`;
+                authorWhere = `WHERE fromUser.id = cast('${safeId}' AS bigint) AND expired_ts IS NULL`;
             }
         }
         const reader = await connection.runAndReadAll(`
@@ -2518,6 +2518,130 @@ function isPurchasesScrapeForceBackfillEnabled() {
     return isTruthyCredsEnv(process.env.purchases_scrape_force_backfill);
 }
 
+const SCRAPE_EXPIRE_NATURAL_REASONS = new Set(['hasMore', 'cutoff']);
+
+function isNaturalScrapeStopReason(reason) {
+    return SCRAPE_EXPIRE_NATURAL_REASONS.has(reason);
+}
+
+function normalizeScrapeRowId(id) {
+    const digits = String(id ?? '').replace(/\D/g, '');
+    return digits || null;
+}
+
+function collectChatMessageIds(list) {
+    const ids = [];
+    for (const msg of list || []) {
+        const id = normalizeScrapeRowId(msg?.id);
+        if (id) ids.push(id);
+    }
+    return ids;
+}
+
+function collectWallPostIds(list) {
+    return collectChatMessageIds(list);
+}
+
+async function ensureScrapeExpiredColumn(connection, tableName) {
+    try {
+        await connection.run(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS expired_ts TIMESTAMP`);
+    } catch (err) {
+        if (!/does not exist|Catalog Error/i.test(String(err.message))) {
+            throw err;
+        }
+    }
+}
+
+async function ensureScrapeExpiredColumns() {
+    const connection = await instance.connect();
+    try {
+        for (const tableName of ['stg_chat_messages', 'stg_wall_posts']) {
+            await ensureScrapeExpiredColumn(connection, tableName);
+        }
+    } finally {
+        await connection.disconnectSync();
+    }
+}
+
+function buildSeenIdsSubquerySql(ids) {
+    const safeIds = [...new Set((ids || []).map(normalizeScrapeRowId).filter(Boolean))];
+    if (!safeIds.length) {
+        return 'SELECT CAST(NULL AS BIGINT) AS id WHERE false';
+    }
+    return `SELECT unnest(CAST([${safeIds.join(',')}] AS BIGINT[])) AS id`;
+}
+
+async function markScrapeIdsActive(tableName, ids) {
+    const safeIds = [...new Set((ids || []).map(normalizeScrapeRowId).filter(Boolean))];
+    if (!safeIds.length) return 0;
+    const connection = await instance.connect();
+    try {
+        await ensureScrapeExpiredColumn(connection, tableName);
+        const seenSql = buildSeenIdsSubquerySql(safeIds);
+        const reader = await connection.runAndReadAll(`
+            UPDATE ${tableName}
+            SET expired_ts = NULL
+            WHERE cast(id AS bigint) IN (SELECT id FROM (${seenSql}))
+              AND expired_ts IS NOT NULL
+            RETURNING 1
+        `);
+        const revived = reader.getRows().length;
+        if (revived > 0) {
+            console.log(`Revived ${revived} expired row(s) in ${tableName} (seen again in API).`);
+        }
+        return revived;
+    } finally {
+        await connection.disconnectSync();
+    }
+}
+
+async function expireUnseenScrapeRows({
+    tableName,
+    authorId,
+    authorIdColumnExpr,
+    windowColumn,
+    windowStartMs,
+    seenIds,
+    runDatetime,
+    label,
+}) {
+    const safeAuthorId = normalizeScrapeRowId(authorId);
+    if (!safeAuthorId) return { expired: 0, revived: 0 };
+    const safeSeenIds = [...new Set((seenIds || []).map(normalizeScrapeRowId).filter(Boolean))];
+    const runTsSql = jsDateToSqlDatetime(runDatetime);
+    const windowTs = new Date(windowStartMs).toISOString().replace('T', ' ').replace('Z', '');
+    const seenSql = buildSeenIdsSubquerySql(safeSeenIds);
+    const connection = await instance.connect();
+    try {
+        await ensureScrapeExpiredColumn(connection, tableName);
+        const revivedReader = await connection.runAndReadAll(`
+            UPDATE ${tableName}
+            SET expired_ts = NULL
+            WHERE cast(id AS bigint) IN (SELECT id FROM (${seenSql}))
+              AND expired_ts IS NOT NULL
+            RETURNING 1
+        `);
+        const expiredReader = await connection.runAndReadAll(`
+            UPDATE ${tableName}
+            SET expired_ts = timestamp '${runTsSql}'
+            WHERE ${authorIdColumnExpr} = cast('${safeAuthorId}' AS bigint)
+              AND cast(${windowColumn} AS timestamp) >= timestamp '${windowTs}'
+              AND expired_ts IS NULL
+              AND cast(id AS bigint) NOT IN (SELECT id FROM (${seenSql}))
+            RETURNING 1
+        `);
+        const expired = expiredReader.getRows().length;
+        const revived = revivedReader.getRows().length;
+        console.log(
+            `${label} backfill expiration: ${expired} row(s) soft-deleted (expired_ts set), ` +
+            `${revived} revived, ${safeSeenIds.length} id(s) seen in API within window.`
+        );
+        return { expired, revived };
+    } finally {
+        await connection.disconnectSync();
+    }
+}
+
 function evaluateScrapeBatchStop({
     jsonResponse,
     trimmed,
@@ -2536,13 +2660,13 @@ function evaluateScrapeBatchStop({
     const { maxMs: batchMaxMs } = getBatchMinMax(inWindowList.length ? inWindowList : trimmed);
     if (!jsonResponse['hasMore']) {
         console.log(`${label} API hasMore=false; stopping scroll.`);
-        onStop();
+        onStop('hasMore');
     } else if (batchMinMs != null && batchMinMs < minWindowMs) {
         console.log(
             `Batch oldest ${new Date(batchMinMs).toISOString()} ` +
             `is before ${maxAgeDays}-day cutoff ${new Date(minWindowMs).toISOString()}; stopping ${label} scroll.`
         );
-        onStop();
+        onStop('cutoff');
     } else if (
         !forceBackfill &&
         highWatermarkMs != null &&
@@ -2554,7 +2678,7 @@ function evaluateScrapeBatchStop({
             `Batch newest ${new Date(batchMaxMs).toISOString()} ` +
             `is older than DB high watermark ${new Date(highWatermarkMs).toISOString()} with no new rows; stopping ${label} scroll.`
         );
-        onStop();
+        onStop('high_watermark');
     }
 }
 
@@ -2575,6 +2699,12 @@ async function getWallPostedAtBoundsMs(authorId, minPostedAtMs) {
         : null;
     const connection = await instance.connect();
     try {
+        let authorWhere = '';
+        if (safeId) {
+            authorWhere = `WHERE author.id = cast('${safeId}' AS bigint) AND expired_ts IS NULL`;
+        } else {
+            authorWhere = 'WHERE expired_ts IS NULL';
+        }
         const reader = await connection.runAndReadAll(`
             SELECT
                 min(cast(postedAt AS timestamp)) FILTER (WHERE cast(postedAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_min_ts,
@@ -2583,7 +2713,7 @@ async function getWallPostedAtBoundsMs(authorId, minPostedAtMs) {
                 min(cast(postedAt AS timestamp)) AS abs_min_ts,
                 count(*) AS total_cnt
             FROM stg_wall_posts
-            WHERE author.id = cast('${safeId}' AS bigint)
+            ${authorWhere}
         `);
         const row = reader.getRows()[0];
         if (!row || Number(row[4]) === 0) {
@@ -2946,6 +3076,7 @@ async function loadChatToDb(filePath, tableName, runDatetime) {
     connection = await instance.connect();
     const duckPath = duckDbJsonPath(filePath);
     try {
+        await ensureScrapeExpiredColumn(connection, tableName);
 	    insertParts = await getTgtInsertParts(connection, tableName, 'cm', filePath);
         // Read json file and insert into pre-existing table
         insertTableSql = `INSERT INTO ${tableName} (${insertParts.colList}) SELECT ${insertParts.selectStr}
@@ -3027,6 +3158,7 @@ async function loadWallPostsToDb(filePath, tableName, jsonResp) {
     connection = await instance.connect();
     const duckPath = duckDbJsonPath(filePath);
     try {
+        await ensureScrapeExpiredColumn(connection, tableName);
     	insertParts = await getTgtInsertParts(connection, tableName, 'wp', filePath);
         // Read json file and insert into pre-existing table
         insertTableSql = `INSERT INTO ${tableName} (${insertParts.colList}) SELECT ${insertParts.selectStr} FROM read_json_auto('${duckPath}', union_by_name=true) wp
@@ -3154,12 +3286,15 @@ async function scrollDnWall() {
 
 async function scrapeChatMessages() {
     let needToScrollUp = true;
+    let chatStopReason = null;
+    let chatEndedAtSafetyCap = false;
     runDatetime = new Date();
     const enqueueChatBatch = createBatchQueue();
     const chatUserId = getAuthorIdFromCreds();
     const chatMaxAgeDays = process.env.wall_scrape_max_age_days || '730';
     const chatMinCreatedAtMs = getChatScrapeMinCreatedAtMs();
     const chatForceBackfill = isChatScrapeForceBackfillEnabled();
+    const seenChatIds = new Set();
 
     logStep('Reading chat createdAt bounds from DuckDB (before reload)...');
     console.log(
@@ -3169,7 +3304,8 @@ async function scrapeChatMessages() {
     if (chatForceBackfill) {
         console.log(
             'chat_scrape_force_backfill=1: high-watermark stop disabled; ' +
-            'scrolling until 730-day cutoff or hasMore=false (maiden-style gap backfill).'
+            'scrolling until 730-day cutoff or hasMore=false (maiden-style gap backfill). ' +
+            'On a full API sweep, messages no longer returned are soft-deleted (expired_ts).'
         );
     }
     const chatBounds = await getChatCreatedAtBoundsMs(chatUserId, chatMinCreatedAtMs);
@@ -3209,7 +3345,7 @@ async function scrapeChatMessages() {
             forceBackfill: chatForceBackfill,
             getBatchMinMax: getBatchMinMaxCreatedAtMs,
             label: 'Chat',
-            onStop: () => { needToScrollUp = false; },
+            onStop: (reason) => { needToScrollUp = false; chatStopReason = reason; },
         });
     }
 
@@ -3238,9 +3374,12 @@ async function scrapeChatMessages() {
                     (batchMinMs != null ? `, oldest ${new Date(batchMinMs).toISOString()}` : '')
                 );
                 let insertCount = 0;
+                const batchIds = collectChatMessageIds(trimmed);
+                for (const id of batchIds) seenChatIds.add(id);
                 if (inWindow.length > 0) {
                     writeJsonFileAtomic(apiOpFile, inWindow);
                     insertCount = await loadChatToDb(apiOpFile, 'stg_chat_messages', runDatetime);
+                    await markScrapeIdsActive('stg_chat_messages', batchIds);
                 } else {
                     console.log('Successfully loaded 0 rows into table "stg_chat_messages"');
                 }
@@ -3277,6 +3416,7 @@ async function scrapeChatMessages() {
             if (!needToScrollUp) break;
         }
         if (scrollCount >= 500 && needToScrollUp) {
+            chatEndedAtSafetyCap = true;
             console.log('Chat scroll stopped after 500 iterations (safety cap).');
         }
         console.log('Chat messages scrape complete.');
@@ -3284,17 +3424,39 @@ async function scrapeChatMessages() {
         page.off('response', onChatResponse);
         await waitInFlightHandlers(() => chatResponsesInFlight);
         await enqueueChatBatch(() => {});
+        if (chatForceBackfill) {
+            if (isNaturalScrapeStopReason(chatStopReason) && !chatEndedAtSafetyCap) {
+                await expireUnseenScrapeRows({
+                    tableName: 'stg_chat_messages',
+                    authorId: chatUserId,
+                    authorIdColumnExpr: 'fromUser.id',
+                    windowColumn: 'createdAt',
+                    windowStartMs: chatMinCreatedAtMs,
+                    seenIds: seenChatIds,
+                    runDatetime,
+                    label: 'Chat',
+                });
+            } else {
+                console.log(
+                    'Skipping chat expiration: force backfill did not complete a full API sweep ' +
+                    `(stop=${chatStopReason || 'incomplete'}, safety_cap=${chatEndedAtSafetyCap}).`
+                );
+            }
+        }
     }
 }
 
 async function scrapeWallPosts() {
 let needToScrollDn = true;
+    let wallStopReason = null;
+    let wallEndedAtSafetyCap = false;
     let scrollCount = 0;
     const enqueueWallBatch = createBatchQueue();
     const authorId = getAuthorIdFromCreds();
     const wallMinPostedAtMs = getWallScrapeMinPostedAtMs();
     const wallMaxAgeDays = process.env.wall_scrape_max_age_days || '730';
     const wallForceBackfill = isWallScrapeForceBackfillEnabled();
+    const seenWallPostIds = new Set();
 
     logStep('Reading wall postedAt bounds from DuckDB (before navigation)...');
     console.log(
@@ -3304,7 +3466,8 @@ let needToScrollDn = true;
     if (wallForceBackfill) {
         console.log(
             'wall_scrape_force_backfill=1: high-watermark stop disabled; ' +
-            'scrolling until 730-day cutoff or hasMore=false (maiden-style gap backfill).'
+            'scrolling until 730-day cutoff or hasMore=false (maiden-style gap backfill). ' +
+            'On a full API sweep, posts no longer returned are soft-deleted (expired_ts).'
         );
     }
     const wallBounds = await getWallPostedAtBoundsMs(authorId, wallMinPostedAtMs);
@@ -3344,7 +3507,7 @@ let needToScrollDn = true;
             forceBackfill: wallForceBackfill,
             getBatchMinMax: getBatchMinMaxPostedAtMs,
             label: 'Wall',
-            onStop: () => { needToScrollDn = false; },
+            onStop: (reason) => { needToScrollDn = false; wallStopReason = reason; },
         });
     }
 
@@ -3365,11 +3528,14 @@ let needToScrollDn = true;
                     (batchMinMs != null ? `, oldest ${new Date(batchMinMs).toISOString()}` : '')
                 );
                 let insertCount = 0;
+                const batchIds = collectWallPostIds(trimmed);
+                for (const id of batchIds) seenWallPostIds.add(id);
                 if (list.length > 0) {
                     const batchPath = path.join(homeDirectory, 'data', `api_out_wall_${Date.now()}.json`);
                     writeJsonFileAtomic(batchPath, list);
                     const batchStart = Date.now();
                     insertCount = await loadWallPostsToDb(batchPath, 'stg_wall_posts', list);
+                    await markScrapeIdsActive('stg_wall_posts', batchIds);
                     logStep(`Wall batch loaded ${insertCount} rows in ${((Date.now() - batchStart) / 1000).toFixed(1)}s`);
                     try { fs.unlinkSync(batchPath); } catch (_) {}
                 } else {
@@ -3401,6 +3567,7 @@ let needToScrollDn = true;
             scrollCount += 1;
         }
         if (scrollCount >= 500 && needToScrollDn) {
+            wallEndedAtSafetyCap = true;
             console.log('Wall scroll stopped after 500 iterations (safety cap).');
         }
         console.log('Wall posts scrape complete.');
@@ -3408,6 +3575,25 @@ let needToScrollDn = true;
         page.off('response', onWallResponse);
         await waitInFlightHandlers(() => wallResponsesInFlight);
         await enqueueWallBatch(() => {});
+        if (wallForceBackfill) {
+            if (isNaturalScrapeStopReason(wallStopReason) && !wallEndedAtSafetyCap) {
+                await expireUnseenScrapeRows({
+                    tableName: 'stg_wall_posts',
+                    authorId,
+                    authorIdColumnExpr: 'author.id',
+                    windowColumn: 'postedAt',
+                    windowStartMs: wallMinPostedAtMs,
+                    seenIds: seenWallPostIds,
+                    runDatetime: new Date(),
+                    label: 'Wall',
+                });
+            } else {
+                console.log(
+                    'Skipping wall expiration: force backfill did not complete a full API sweep ' +
+                    `(stop=${wallStopReason || 'incomplete'}, safety_cap=${wallEndedAtSafetyCap}).`
+                );
+            }
+        }
     }
 }
 
@@ -3683,6 +3869,7 @@ function buildReplContext() {
 console.log('Opening DuckDB (if this hangs >30s, close duckdb-cli holding web.db)...');
 const duckDbOpenStart = Date.now();
 instance = await DuckDBInstance.create(dbPath);     // run while switching from duckdb cli!
+await ensureScrapeExpiredColumns();
 logStep(`DuckDB ready: ${dbPath} (opened in ${((Date.now() - duckDbOpenStart) / 1000).toFixed(1)}s)`);
 
 if (isReplMode) {
