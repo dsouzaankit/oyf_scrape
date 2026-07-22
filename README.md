@@ -22,8 +22,8 @@ sql_script/media_origin_date_tracker_multi_author.sql  →  approx wall-post ori
 | `data/config.env` | Credentials, `chat_thread`, `wall_profile`, `of_web` (one author at a time) |
 | `data/testChromeSession/` | Persistent Chrome profile (cookies / session) |
 | `local_run/` | One-click scrape launchers (`scrape_*.ps1`) |
-| `local_run/local_setup/` | Author switchers (`set_config_author*.ps1`) |
-| `sql_script/` | Ad-hoc DuckDB analysis scripts + media-origin trackers |
+| `local_run/local_setup/` | Author switchers, force-backfill / debug toggles, clear `expired_ts` for active author |
+| `sql_script/` | Ad-hoc DuckDB analysis, media-origin trackers, clear-expired soft-deletes |
 | `data/scripts/` | `compact_web_db` / `analyze_web_db` maintenance |
 | `dbt/webDataELT/` | dbt models for media dimension ELT |
 
@@ -62,7 +62,9 @@ To use a different location, set `WEB_SCRAPE_NODE_HOME` to the folder that conta
   data/
     config.env             # secrets + URLs (not committed)
     web.db                # DuckDB file
-    api_out.json          # latest API batch (overwritten each response)
+    api_out.json          # latest API batch (overwrite), or NDJSON append log when scrape_debug=1
+    api_out.load.json     # current batch for DuckDB when scrape_debug=1
+    api_out_wall_*.json   # wall batch temp files (deleted right after DuckDB load)
     testChromeSession/    # Chrome user data dir
   logs/
     error_log_*.log
@@ -87,6 +89,7 @@ wall_scrape_max_age_days=730
 wall_scrape_force_backfill=0
 chat_scrape_force_backfill=0
 purchases_scrape_force_backfill=0
+scrape_debug=0
 
 # alternate author (ignored)
 // chat_thread=https://...com/my/chats/chat/<other_author_id>
@@ -115,7 +118,17 @@ Scripts live under `local_run/local_setup/`.
 & '.\local_run\local_setup\set_config_force_backfill.ps1' -Disable   # default incremental stop
 & '.\local_run\local_setup\set_config_force_backfill.ps1' -Status
 & '.\local_run\local_setup\set_config_force_backfill.ps1'            # toggle all three keys (default)
+& '.\local_run\local_setup\set_config_debug.ps1' -Enable             # api_out.json append-only NDJSON
+& '.\local_run\local_setup\set_config_debug.ps1' -Disable
+& '.\local_run\local_setup\set_config_debug.ps1' -Status
+& '.\local_run\local_setup\clear_expired_for_active_author.ps1'      # undo expired_ts for active author
+& '.\local_run\local_setup\clear_expired_for_active_author.ps1' -WhatIf
+& '.\local_run\local_setup\clear_expired_for_active_author.ps1' -AuthorId 253745725
 ```
+
+**Debug (`scrape_debug`):** when `1`, chat/purchases **append** each API batch to `data/api_out.json` as **NDJSON** (one JSON array per line; file truncated at scrape start). DuckDB still loads only the current batch from `data/api_out.load.json`. Default `0` overwrites `api_out.json` each batch.
+
+**Wall batch files:** wall does **not** use `api_out.json`. Each non-empty in-window batch writes `data/api_out_wall_<timestamp>.json`, loads it into DuckDB, then **deletes that file immediately**. Empty batches create no file. Leftover `api_out_wall_*.json` files only appear if the process dies between write and delete (no end-of-run cleanup sweep). `scrape_debug` does not change wall temp-file behavior.
 
 **One-click per author:**
 
@@ -187,7 +200,9 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_u
 | `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases`; then `run_media_origin_tracker_by_days_purchases.ps1` |
 | `local_run/local_setup/add_config_author.ps1` | Interactive add author URLs + create `set_config_author_<author_id>.ps1` |
 | `local_run/local_setup/set_config_author.ps1` | Activate one author in `data/config.env` (`chat_thread` + `wall_profile` pair) |
-| `local_run/local_setup/set_config_force_backfill.ps1` | Toggle `wall_scrape_force_backfill`, `chat_scrape_force_backfill`, and `purchases_scrape_force_backfill` (disable high-watermark stop for gap backfill; chat/wall also enable `expired_ts` sweep on full API pass) |
+| `local_run/local_setup/set_config_force_backfill.ps1` | Toggle `wall_scrape_force_backfill`, `chat_scrape_force_backfill`, and `purchases_scrape_force_backfill` (disable high-watermark stop for gap backfill; chat/wall also soft-delete unseen ids progressively + final sweep) |
+| `local_run/local_setup/set_config_debug.ps1` | Toggle `scrape_debug` — chat/purchases `api_out.json` append-only NDJSON (`api_out.load.json` for DuckDB) |
+| `local_run/local_setup/clear_expired_for_active_author.ps1` | DuckDB CLI: clear `expired_ts` on chat + wall for active `chat_thread` author (`sql_script/clear_expired_for_author.sql`) |
 | `local_run/local_setup/set_config_author_<author_id>.ps1` | One-click activate for a specific author — see **Switch author** |
 | `data/scripts/compact_web_db.ps1` | `CHECKPOINT` + `VACUUM` on `data/web.db` (run **after** scraper/CLI close; see **Database maintenance**) |
 | `sql_script/open_web_db.ps1` | DuckDB CLI: attach `data/web.db` as schema `web` (write when possible; `-ReadOnly` to force) |
@@ -417,11 +432,28 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-ConfigPath`, `-DuckDb
 | `purchases_scrape_force_backfill` | `0` (default) — incremental; stop when batch newest &lt; DB high watermark with no new rows |
 | `purchases_scrape_force_backfill` | `1` — skip high-watermark stop; scroll for gap backfill until 730-day cutoff or `hasMore=false` |
 
-**Force backfill expiration (chat + wall):** when `chat_scrape_force_backfill=1` or `wall_scrape_force_backfill=1` and the run completes a **full API sweep** (`hasMore=false` or 730-day cutoff — not the 500-scroll safety cap), rows in the scrape window that were **not** returned by the API are **soft-deleted**: `expired_ts` is set on `stg_chat_messages` / `stg_wall_posts`. Rows are retained on disk (not physically deleted). Every API batch tracks all returned `id` values (including batches outside the date window). IDs seen again in a later run clear `expired_ts` (`markScrapeIdsActive`). Incremental runs (`force_backfill=0`) never expire rows.
+**Force backfill expiration (chat + wall):** when `chat_scrape_force_backfill=1` or `wall_scrape_force_backfill=1`:
+
+1. **Per batch:** when the next API batch’s newest timestamp is **older** than the previous batch’s newest, soft-delete in-window rows with timestamp **strictly newer than that next-batch newest** that were not seen yet (`expired_ts` set). Logs **`earliest expired mark date`** and **`soft-deleted id(s): …`** each iteration so you can **Ctrl+C** once past dates/ids you care about. Batches that are not older (equal/newer / out-of-order) skip expire and do not advance the frontier.
+2. **Final sweep:** on a full stop (`hasMore=false` or 730-day cutoff — not the 500-scroll safety cap), expire any remaining in-window ids still not seen (also logs cleared ids). Incomplete runs keep progressive soft-deletes and skip the final sweep.
+
+Every API batch tracks returned `id` values. IDs seen again clear `expired_ts` (`markScrapeIdsActive`). Incremental runs (`force_backfill=0`) never expire rows.
+
+**Caveat:** chat/wall UI scroll often returns **sparse, non-contiguous** pages. Soft-delete keys off “not in this pass’s API batches,” not “gone from the GUI,” so force backfill can expire rows you still see in the site UI. Prefer reviewing the soft-deleted id logs before relying on expiration.
+
+**Undo soft-deletes:** DuckDB CLI script clears `expired_ts` on `stg_chat_messages` + `stg_wall_posts` for the active `chat_thread` author (or `-AuthorId`). Close the scraper / other DuckDB writers first if the DB is locked.
+
+```powershell
+& '.\local_run\local_setup\clear_expired_for_active_author.ps1'
+& '.\local_run\local_setup\clear_expired_for_active_author.ps1' -WhatIf   # read-only active/expired counts
+& '.\local_run\local_setup\clear_expired_for_active_author.ps1' -AuthorId 253745725
+```
+
+SQL: `sql_script/clear_expired_for_author.sql` (PS1 injects `author_id` into the `author_filter` unnest line).
 
 | Column | Table | Meaning |
 |--------|-------|---------|
-| `expired_ts` | `stg_chat_messages`, `stg_wall_posts` | `NULL` = active (API-visible); timestamp = soft-deleted after backfill sweep |
+| `expired_ts` | `stg_chat_messages`, `stg_wall_posts` | `NULL` = active (API-visible); timestamp = soft-deleted (progressive older-batch and/or final backfill) |
 
 **Who uses `expired_ts`:**
 
@@ -687,6 +719,8 @@ web_scrape/
       add_config_author.ps1             # interactive add author + one-click script
       set_config_author.ps1             # switch active author in config.env
       set_config_force_backfill.ps1      # toggle wall/chat/purchases scrape_force_backfill
+      set_config_debug.ps1              # toggle scrape_debug (api_out.json append-only NDJSON)
+      clear_expired_for_active_author.ps1  # undo expired_ts via DuckDB CLI + clear_expired_for_author.sql
       set_config_author_180951488.ps1   # one-click activate author_id 180951488
       set_config_author_253745725.ps1   # one-click activate author_id 253745725
       set_config_author_24569249.ps1   # one-click activate author_id 24569249
@@ -696,18 +730,19 @@ web_scrape/
     analyze_web_db.ps1
     analyze_web_db.js                  # read-only size/row-count report (--deep for storage segments)
   sql_script/
+    clear_expired_for_author.sql       # clear expired_ts for one author (chat + wall)
     run_media_origin_tracker.ps1       # single media-origin report
     run_media_origin_tracker_by_days.ps1  # report for 30/60/90/180/365-day windows
     run_media_origin_tracker_by_days_purchases.ps1  # unlocked media origin (stg_chat_unlocks)
     media_origin_date_tracker_multi_author.sql
     media_origin_date_tracker_multi_author_purchases.sql
+    open_web_db.ps1                    # interactive DuckDB CLI on web.db
   dbt/
     profiles.example.yml
     webDataELT/
       models/
   job_reqs_book_matcher/               # unrelated subproject
 ```
-
 On `P:\all_scripts\oyf_scrape` (data root): `data/`, `logs/`, `sql_script/`.
 
 ## License

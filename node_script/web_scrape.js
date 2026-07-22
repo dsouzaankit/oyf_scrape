@@ -923,6 +923,16 @@ function validateCredsAtStartup() {
     if (scrapeMode === 'chat') {
         console.log(`media_dim_history_retain_runs: ${getMediaDimHistoryRetainRuns()}`);
     }
+    const forceBackfillKey =
+        scrapeMode === 'wall' ? 'wall_scrape_force_backfill'
+            : scrapeMode === 'purchases' ? 'purchases_scrape_force_backfill'
+                : 'chat_scrape_force_backfill';
+    const flagOn = (key) => {
+        const v = String(process.env[key] ?? '').trim().toLowerCase();
+        return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+    };
+    console.log(`${forceBackfillKey}=${flagOn(forceBackfillKey) ? '1' : '0'}`);
+    console.log(`scrape_debug=${flagOn('scrape_debug') ? '1' : '0'}`);
 }
 
 validateCredsAtStartup();
@@ -2294,6 +2304,41 @@ function writeJsonFileAtomic(filePath, data) {
     return text;
 }
 
+function isScrapeDebugEnabled() {
+    return isTruthyCredsEnv(process.env.scrape_debug);
+}
+
+function getApiOutLoadFile() {
+    return path.join(homeDirectory, 'data', 'api_out.load.json');
+}
+
+/** Truncate api_out.json at scrape start when scrape_debug=1 (fresh NDJSON append log). */
+function resetApiOutAppendLogIfDebug() {
+    if (!isScrapeDebugEnabled()) return;
+    fs.writeFileSync(apiOpFile, '', 'utf-8');
+    console.log(
+        'scrape_debug=1: api_out.json is append-only NDJSON (one batch JSON array per line); ' +
+        `DuckDB loads each batch from ${path.basename(getApiOutLoadFile())}.`
+    );
+}
+
+/**
+ * Write the current API batch for DuckDB load. When scrape_debug=1, also append the
+ * batch as one NDJSON line to api_out.json (does not overwrite prior batches).
+ * @returns {string} path to pass to load*ToDb
+ */
+function writeApiOutBatch(data) {
+    if (isScrapeDebugEnabled()) {
+        const compact = JSON.stringify(JSON.parse(stringifyJsonForDb(data)));
+        fs.appendFileSync(apiOpFile, `${compact}\n`, 'utf-8');
+        const loadPath = getApiOutLoadFile();
+        writeJsonFileAtomic(loadPath, data);
+        return loadPath;
+    }
+    writeJsonFileAtomic(apiOpFile, data);
+    return apiOpFile;
+}
+
 function createBatchQueue() {
     let chain = Promise.resolve();
     return (fn) => {
@@ -2633,18 +2678,134 @@ async function expireUnseenScrapeRows({
               AND cast(${windowColumn} AS timestamp) >= timestamp '${windowTs}'
               AND expired_ts IS NULL
               AND cast(id AS bigint) NOT IN (SELECT id FROM (${seenSql}))
-            RETURNING 1
+            RETURNING cast(id AS varchar)
         `);
-        const expired = expiredReader.getRows().length;
+        const expiredIds = expiredReader.getRows().map((row) => String(row[0])).filter(Boolean);
+        const expired = expiredIds.length;
         const revived = revivedReader.getRows().length;
         console.log(
-            `${label} backfill expiration: ${expired} row(s) soft-deleted (expired_ts set), ` +
-            `${revived} revived, ${safeSeenIds.length} id(s) seen in API within window.`
+            `${label} backfill expiration (final sweep): ${expired} row(s) soft-deleted (expired_ts set), ` +
+            `${revived} revived, ${safeSeenIds.length} id(s) seen in API.`
         );
-        return { expired, revived };
+        if (expired > 0) {
+            console.log(`${label} soft-deleted id(s): ${expiredIds.join(', ')}`);
+        }
+        return { expired, revived, expiredIds };
     } finally {
         await connection.disconnectSync();
     }
+}
+
+function tsToSqlUtc(ms) {
+    return new Date(ms).toISOString().replace('T', ' ').replace('Z', '');
+}
+
+/** Soft-delete in-window active rows newer than frontierMs and not in seenIds. */
+async function expireUnseenScrapeRowsAboveFrontier({
+    tableName,
+    authorId,
+    authorIdColumnExpr,
+    windowColumn,
+    windowStartMs,
+    frontierMs,
+    seenIds,
+    runDatetime,
+    label,
+}) {
+    const safeAuthorId = normalizeScrapeRowId(authorId);
+    if (!safeAuthorId || frontierMs == null || !Number.isFinite(frontierMs)) {
+        return { expired: 0, earliestExpiredMs: null };
+    }
+    const safeSeenIds = [...new Set(seenIdsToArray(seenIds).map(normalizeScrapeRowId).filter(Boolean))];
+    const runTsSql = jsDateToSqlDatetime(runDatetime);
+    const windowTs = tsToSqlUtc(windowStartMs);
+    const frontierTs = tsToSqlUtc(frontierMs);
+    const seenSql = buildSeenIdsSubquerySql(safeSeenIds);
+    const connection = await instance.connect();
+    try {
+        await ensureScrapeExpiredColumn(connection, tableName);
+        const expiredReader = await connection.runAndReadAll(`
+            UPDATE ${tableName}
+            SET expired_ts = timestamp '${runTsSql}'
+            WHERE ${authorIdColumnExpr} = cast('${safeAuthorId}' AS bigint)
+              AND cast(${windowColumn} AS timestamp) >= timestamp '${windowTs}'
+              AND cast(${windowColumn} AS timestamp) > timestamp '${frontierTs}'
+              AND expired_ts IS NULL
+              AND cast(id AS bigint) NOT IN (SELECT id FROM (${seenSql}))
+            RETURNING cast(id AS varchar), cast(${windowColumn} AS timestamp)
+        `);
+        const rows = expiredReader.getRows();
+        const expired = rows.length;
+        const expiredIds = [];
+        let earliestExpiredMs = null;
+        for (const row of rows) {
+            if (row[0] != null) expiredIds.push(String(row[0]));
+            const t = row[1] != null ? new Date(row[1]).getTime() : NaN;
+            if (!Number.isFinite(t)) continue;
+            if (earliestExpiredMs == null || t < earliestExpiredMs) earliestExpiredMs = t;
+        }
+        if (expired > 0) {
+            console.log(
+                `${label} backfill expire (batch newer than next ${new Date(frontierMs).toISOString()}): ` +
+                `${expired} row(s); earliest expired mark date ` +
+                `${new Date(earliestExpiredMs).toISOString()} ` +
+                `(Ctrl+C to stop early if past the dates you care about).`
+            );
+            console.log(`${label} soft-deleted id(s): ${expiredIds.join(', ')}`);
+        }
+        return { expired, earliestExpiredMs, expiredIds };
+    } finally {
+        await connection.disconnectSync();
+    }
+}
+
+/**
+ * Progressive force-backfill expire: when the next batch's newest timestamp is
+ * older than the previous batch's newest, soft-delete unseen ids strictly newer
+ * than that next-batch newest (the scroll frontier).
+ */
+function createBackfillExpireOnOlderBatch({
+    tableName,
+    authorId,
+    authorIdColumnExpr,
+    windowColumn,
+    windowStartMs,
+    seenIds,
+    label,
+}) {
+    let prevBatchMaxMs = null;
+
+    async function onBatch({ batchMaxMs, runDatetime }) {
+        if (batchMaxMs == null || !Number.isFinite(batchMaxMs)) {
+            return { expired: 0, advanced: false };
+        }
+        if (prevBatchMaxMs == null) {
+            prevBatchMaxMs = batchMaxMs;
+            return { expired: 0, advanced: false };
+        }
+        if (batchMaxMs >= prevBatchMaxMs) {
+            console.log(
+                `${label} backfill expire: skip (batch newest ${new Date(batchMaxMs).toISOString()} ` +
+                `is not older than previous ${new Date(prevBatchMaxMs).toISOString()}).`
+            );
+            return { expired: 0, advanced: false };
+        }
+        const result = await expireUnseenScrapeRowsAboveFrontier({
+            tableName,
+            authorId,
+            authorIdColumnExpr,
+            windowColumn,
+            windowStartMs,
+            frontierMs: batchMaxMs,
+            seenIds,
+            runDatetime,
+            label,
+        });
+        prevBatchMaxMs = batchMaxMs;
+        return { ...result, advanced: true };
+    }
+
+    return { onBatch, getPrevBatchMaxMs: () => prevBatchMaxMs };
 }
 
 function evaluateScrapeBatchStop({
@@ -3300,8 +3461,20 @@ async function scrapeChatMessages() {
     const chatMinCreatedAtMs = getChatScrapeMinCreatedAtMs();
     const chatForceBackfill = isChatScrapeForceBackfillEnabled();
     const seenChatIds = new Set();
+    const chatExpireTracker = chatForceBackfill
+        ? createBackfillExpireOnOlderBatch({
+            tableName: 'stg_chat_messages',
+            authorId: chatUserId,
+            authorIdColumnExpr: 'fromUser.id',
+            windowColumn: 'createdAt',
+            windowStartMs: chatMinCreatedAtMs,
+            seenIds: seenChatIds,
+            label: 'Chat',
+        })
+        : null;
 
     logStep('Reading chat createdAt bounds from DuckDB (before reload)...');
+    resetApiOutAppendLogIfDebug();
     console.log(
         `Chat scrape window: createdAt >= ${new Date(chatMinCreatedAtMs).toISOString()} ` +
         `(wall_scrape_max_age_days=${chatMaxAgeDays})`
@@ -3310,7 +3483,8 @@ async function scrapeChatMessages() {
         console.log(
             'chat_scrape_force_backfill=1: high-watermark stop disabled; ' +
             'scrolling until 730-day cutoff or hasMore=false (maiden-style gap backfill). ' +
-            'On a full API sweep, messages no longer returned are soft-deleted (expired_ts).'
+            'Soft-deletes when each next batch newest is older than the previous batch; ' +
+            'final unseen sweep on full API stop. Watch "earliest expired mark date" to Ctrl+C early.'
         );
     }
     const chatBounds = await getChatCreatedAtBoundsMs(chatUserId, chatMinCreatedAtMs);
@@ -3382,11 +3556,16 @@ async function scrapeChatMessages() {
                 const batchIds = collectChatMessageIds(trimmed);
                 for (const id of batchIds) seenChatIds.add(id);
                 if (inWindow.length > 0) {
-                    writeJsonFileAtomic(apiOpFile, inWindow);
-                    insertCount = await loadChatToDb(apiOpFile, 'stg_chat_messages', runDatetime);
-                    await markScrapeIdsActive('stg_chat_messages', batchIds);
+                    const loadPath = writeApiOutBatch(inWindow);
+                    insertCount = await loadChatToDb(loadPath, 'stg_chat_messages', runDatetime);
                 } else {
                     console.log('Successfully loaded 0 rows into table "stg_chat_messages"');
+                }
+                if (batchIds.length > 0) {
+                    await markScrapeIdsActive('stg_chat_messages', batchIds);
+                }
+                if (chatExpireTracker) {
+                    await chatExpireTracker.onBatch({ batchMaxMs, runDatetime });
                 }
                 evaluateChatBatchStop(jsonResponse, trimmed, inWindow, insertCount);
             });
@@ -3443,8 +3622,9 @@ async function scrapeChatMessages() {
                 });
             } else {
                 console.log(
-                    'Skipping chat expiration: force backfill did not complete a full API sweep ' +
-                    `(stop=${chatStopReason || 'incomplete'}, safety_cap=${chatEndedAtSafetyCap}).`
+                    'Skipping chat final expiration sweep: force backfill did not complete a full API sweep ' +
+                    `(stop=${chatStopReason || 'incomplete'}, safety_cap=${chatEndedAtSafetyCap}). ` +
+                    'Progressive soft-deletes from older-batch steps are kept.'
                 );
             }
         }
@@ -3462,6 +3642,17 @@ let needToScrollDn = true;
     const wallMaxAgeDays = process.env.wall_scrape_max_age_days || '730';
     const wallForceBackfill = isWallScrapeForceBackfillEnabled();
     const seenWallPostIds = new Set();
+    const wallExpireTracker = wallForceBackfill
+        ? createBackfillExpireOnOlderBatch({
+            tableName: 'stg_wall_posts',
+            authorId,
+            authorIdColumnExpr: 'author.id',
+            windowColumn: 'postedAt',
+            windowStartMs: wallMinPostedAtMs,
+            seenIds: seenWallPostIds,
+            label: 'Wall',
+        })
+        : null;
 
     logStep('Reading wall postedAt bounds from DuckDB (before navigation)...');
     console.log(
@@ -3472,7 +3663,8 @@ let needToScrollDn = true;
         console.log(
             'wall_scrape_force_backfill=1: high-watermark stop disabled; ' +
             'scrolling until 730-day cutoff or hasMore=false (maiden-style gap backfill). ' +
-            'On a full API sweep, posts no longer returned are soft-deleted (expired_ts).'
+            'Soft-deletes when each next batch newest is older than the previous batch; ' +
+            'final unseen sweep on full API stop. Watch "earliest expired mark date" to Ctrl+C early.'
         );
     }
     const wallBounds = await getWallPostedAtBoundsMs(authorId, wallMinPostedAtMs);
@@ -3540,12 +3732,17 @@ let needToScrollDn = true;
                     writeJsonFileAtomic(batchPath, list);
                     const batchStart = Date.now();
                     insertCount = await loadWallPostsToDb(batchPath, 'stg_wall_posts', list);
-                    await markScrapeIdsActive('stg_wall_posts', batchIds);
                     logStep(`Wall batch loaded ${insertCount} rows in ${((Date.now() - batchStart) / 1000).toFixed(1)}s`);
                     try { fs.unlinkSync(batchPath); } catch (_) {}
                 } else {
                     console.log('Successfully loaded 0 rows into table "stg_wall_posts"');
                     logStep('Wall batch loaded 0 rows in 0.0s');
+                }
+                if (batchIds.length > 0) {
+                    await markScrapeIdsActive('stg_wall_posts', batchIds);
+                }
+                if (wallExpireTracker) {
+                    await wallExpireTracker.onBatch({ batchMaxMs, runDatetime: new Date() });
                 }
 
                 evaluateWallBatchStop(jsonResponse, trimmed, list, insertCount);
@@ -3594,8 +3791,9 @@ let needToScrollDn = true;
                 });
             } else {
                 console.log(
-                    'Skipping wall expiration: force backfill did not complete a full API sweep ' +
-                    `(stop=${wallStopReason || 'incomplete'}, safety_cap=${wallEndedAtSafetyCap}).`
+                    'Skipping wall final expiration sweep: force backfill did not complete a full API sweep ' +
+                    `(stop=${wallStopReason || 'incomplete'}, safety_cap=${wallEndedAtSafetyCap}). ` +
+                    'Progressive soft-deletes from older-batch steps are kept.'
                 );
             }
         }
@@ -3678,6 +3876,7 @@ async function scrapeChatUnlocks() {
     const purchasesForceBackfill = isPurchasesScrapeForceBackfillEnabled();
 
     logStep('Reading purchases createdAt bounds from DuckDB (before navigation)...');
+    resetApiOutAppendLogIfDebug();
     console.log(
         `Purchases scrape window: createdAt >= ${new Date(purchasesMinCreatedAtMs).toISOString()} ` +
         `(wall_scrape_max_age_days=${purchasesMaxAgeDays})`
@@ -3750,8 +3949,8 @@ async function scrapeChatUnlocks() {
                     );
                     let insertCount = 0;
                     if (inWindow.length > 0) {
-                        writeJsonFileAtomic(apiOpFile, inWindow);
-                        insertCount = await loadChatUnlocksToDb(apiOpFile, 'stg_chat_unlocks');
+                        const loadPath = writeApiOutBatch(inWindow);
+                        insertCount = await loadChatUnlocksToDb(loadPath, 'stg_chat_unlocks');
                     } else {
                         console.log('Successfully loaded 0 rows into table "stg_chat_unlocks"');
                     }
