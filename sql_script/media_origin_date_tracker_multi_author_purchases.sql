@@ -103,7 +103,7 @@ t1.author_id
 , t1.msg_price
 , t1.media_count
 , round(t1.media_duration * 1.0 / t1.tot_duration_per_msg, 2) duration_ratio
-, t2g.posted_date approx_origin_date
+, coalesce(t2g.posted_date, date '1900-01-01') approx_origin_date
 from t1
 left join t2_intv_grpd t2g
 	on t1.author_id = t2g.author_id

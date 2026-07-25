@@ -58,7 +58,8 @@ from t2
 )
 , t2_intv_grpd as (
 select author_id, posted_date
-, min(media_id_v2) first_media_id_v2, max(next_media_id_v2) last_media_id_v2
+, min(media_id_v2) first_media_id_v2
+, max(next_media_id_v2) last_media_id_v2
 from t2_intv
 group by 1,2
 )
@@ -68,7 +69,7 @@ select
 t1.created_date, t1.media_id, t1.media_duration, t1.msg_price
 , t1.media_count, round(t1.media_duration * 1.0 / t1.tot_duration_per_msg, 2) duration_ratio
 --, t1.tot_duration_per_msg tot_durtn_per_msg
-, t2g.posted_date approx_origin_date
+, coalesce(t2g.posted_date, date '1900-01-01') approx_origin_date
 --, t2g.first_media_id_v2, t2g.last_media_id_v2
 --count(1) n_rows, count(distinct row(t1.media_id, t1.created_ts)) n_messages
 from t1 left join t2_intv_grpd t2g
