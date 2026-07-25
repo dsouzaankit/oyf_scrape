@@ -341,6 +341,8 @@ Maps chat `media_id` to an approximate wall-post date (`approx_origin_date`) by 
 
 **Expired messages:** rows with `expired_ts` set (after chat/wall force backfill) are excluded from the report and from wall-post interval bands. See **Who uses `expired_ts`** under incremental load logic.
 
+**Edge case — non-monotonic wall `media_id`:** wall posts are not always ordered by increasing media id. The tracker builds day bands from `media_id_v2 = greatest(media_id, max_media_id_yet)` (running max by `postedAt`), then assigns each chat/unlock `media_id` to a day where `first_media_id_v2 <= id < last_media_id_v2`. If an **earlier** post uses a **higher** id than a later post, the later day’s band can collapse (empty range) and nearby chat ids fall into the **previous** day’s wider band. Example: wall `4508438257` on **Jun 13** after wall `4508468661` on **Jun 12** → Jun 13 band empty; chat `4508438273` can get `approx_origin_date` **Jun 11** instead of Jun 13. Treat `approx_origin_date` as approximate when wall ids go backwards in time.
+
 **SQL:** `sql_script/media_origin_date_tracker_multi_author.sql`
 
 Built-in optional filters (edit CTEs in the SQL file, or let PS1 inject values):
