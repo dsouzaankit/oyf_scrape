@@ -74,7 +74,7 @@ t1.created_date, t1.media_id, t1.media_duration, t1.msg_price
 from t1 left join t2_intv_grpd t2g
 --from t2_intv_grpd
 on t1.media_id >= t2g.first_media_id_v2 and t1.media_id < t2g.last_media_id_v2
-where year(t2g.posted_date) >= 2025
+where year(coalesce(t2g.posted_date, current_date)) >= 2025
 -- filter for videos
 and t1.media_duration > 0
 --and media_id = 4261547299

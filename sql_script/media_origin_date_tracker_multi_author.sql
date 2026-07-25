@@ -145,7 +145,7 @@ and (
 )
 and (
 	(select last_n_days from origin_days_filter) is null
-	or t2g.posted_date >= current_date - (select last_n_days from origin_days_filter)
+	or coalesce(t2g.posted_date, current_date) >= current_date - (select last_n_days from origin_days_filter)
 )
 -- One row per message (chat_id) that contains the media; re-sent media in newer messages still appears on both rows.
 qualify row_number() over (partition by t1.author_id, t1.media_id, t1.chat_id order by created_date desc) = 1

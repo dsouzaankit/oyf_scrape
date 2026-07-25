@@ -128,7 +128,7 @@ and (
 )
 and (
 	(select last_n_days from origin_days_filter) is null
-	or t2g.posted_date >= current_date - (select last_n_days from origin_days_filter)
+	or coalesce(t2g.posted_date, current_date) >= current_date - (select last_n_days from origin_days_filter)
 )
 -- One row per unlock message (unlock_id) that contains the media.
 qualify row_number() over (partition by t1.author_id, t1.media_id, t1.unlock_id order by unlock_date desc) = 1
