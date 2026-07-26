@@ -59,7 +59,7 @@ select json_extract_string(author, '$.id') author_id
 , date(cast(postedAt as timestamp)) posted_date
 , id wall_post_id
 , "text" wall_text
-, tipsAmount wall_price
+, price wall_price
 , unnest(media) media
 from stg_wall_posts
 where json_extract_string(author, '$.id') is not null

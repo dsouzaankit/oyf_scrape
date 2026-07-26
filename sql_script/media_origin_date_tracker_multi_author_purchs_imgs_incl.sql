@@ -1,11 +1,12 @@
--- Track approximate wall-post origin date for chat media, per author.
--- Supports multiple author_id values: windows and joins are partitioned by author_id.
--- author name can be tracked from config.env
+-- Track approximate wall-post origin date for unlocked (purchased) chat media, per author.
+-- Filename suffix _purchs_imgs_incl: purchases source + images included (distinct from video-only purchases report).
+-- Sources stg_chat_unlocks. Includes videos and images (no duration > 0 filter).
 -- Optional author filter: empty list = all authors; add IDs to restrict.
--- Optional msg text filter: empty list = all messages; add substrings to match (case-insensitive).
+-- Optional msg text filter: empty list = all unlock messages; add substrings to match (case-insensitive).
 -- Optional media_id filter: empty list = all media; add bigint IDs to restrict.
--- Optional origin days filter: null last_n_days = all dates; else approx_origin_date within last N days.
--- Excludes media_id values present in stg_chat_unlocks (paid chat purchases).
+-- origin_year_filter: start_year = newer, end_year = older (inclusive on approx_origin_date year);
+--   null start_year = no year filter.
+-- include_images_filter: true = videos + images; false = videos only (duration > 0).
 
 -- await instance.closeSync();
 -- await connection.closeSync();
@@ -21,55 +22,45 @@ with author_filter as (
 )
 , msg_text_filter as (
 	select unnest([]::varchar[]) as filter_text
-	-- select unnest(['2 free SVIP'
-	--     , 'FREE VIP LIVE PASS'
-	-- 	, 'BESTSELLERS OF ALL TIME'
-	--     , 'if you want the full'
-	-- 	, 'ever gotten this nasty'
-	--   ]) as filter_text
 	-- select unnest(['bundle', 'sale', 'custom']) as filter_text
 )
 , media_id_filter as (
 	select unnest([]::bigint[]) as media_id
-	-- select unnest([4243934481::bigint]) as media_id
-	-- select unnest([4261547299::bigint, 1234567890::bigint]) as media_id
+	-- select unnest([4261531034::bigint]) as media_id
 )
-, origin_days_filter as (
-	select null::integer as last_n_days
-	-- select 90 as last_n_days
+, origin_year_filter as (
+	-- start_year = newer, end_year = older (inclusive on approx_origin_date year)
+	select 2025::integer as start_year, 2023::integer as end_year
+	-- select null::integer as start_year, null::integer as end_year
 )
-, unlocked_media as (
-	select distinct cast(json_extract_string(media, '$.id') as bigint) as media_id
-	from (
-		select unnest(media) media
-		from stg_chat_unlocks
-	)
-	where media is not null
+, include_images_filter as (
+	select true as include_images
+	-- select false as include_images
 )
 , t12 as (
-select id chat_id
-, json_extract_string(fromUser, '$.id') author_id
+select id unlock_id
+, cast(fromUser.id as varchar) author_id
 , "text" msg_text
 , mediaCount n_media
 , price msg_price
-, cast(createdAt as timestamp) created_ts
-, date(cast(createdAt as timestamp)) created_date
+, cast(createdAt as timestamp) unlock_ts
+, date(cast(createdAt as timestamp)) unlock_date
 , unnest(media) media
-from stg_chat_messages
-where json_extract_string(fromUser, '$.id') is not null
-and expired_ts is null
+from stg_chat_unlocks
+where fromUser.id is not null
 )
 , t1 as (
-select chat_id, author_id, msg_text
-, cast(json_extract_string(media, '$.id') as bigint) media_id
+select unlock_id, author_id, msg_text
+, media.id media_id
 , msg_price
-, cast(json_extract_string(media, '$.duration') AS int) duration
+, cast(media.duration AS int) duration
 , n_media
-, sum(coalesce(cast(json_extract_string(media, '$.duration') AS int), 0)) over (
-    partition by chat_id
+, sum(coalesce(cast(media.duration AS int), 0)) over (
+    partition by unlock_id
     rows between unbounded preceding and unbounded following) tot_duration_per_msg
-, created_ts, created_date
+, unlock_ts, unlock_date
 from t12
+where media.id is not null
 )
 , t21 as (
 select json_extract_string(author, '$.id') author_id
@@ -113,7 +104,6 @@ select author_id, posted_date
 from t2_intv
 group by author_id, posted_date
 )
--- Exact wall post for this media_id (if the clip also appears on the wall). Latest post wins.
 , wall_media_exact as (
 select author_id
 , cast(json_extract_string(media, '$.id') as bigint) media_id
@@ -130,8 +120,13 @@ qualify row_number() over (
 
 select
 t1.msg_text
-, t1.created_date, t1.media_id, t1.duration, t1.msg_price
-, t1.n_media, round(t1.duration * 1.0 / t1.tot_duration_per_msg, 2) duration_ratio
+, t1.unlock_date
+, t1.media_id
+, t1.duration
+, case when coalesce(t1.duration, 0) > 0 then 'video' else 'image' end media_kind
+, t1.msg_price
+, t1.n_media
+, round(t1.duration * 1.0 / nullif(t1.tot_duration_per_msg, 0), 2) duration_ratio
 , coalesce(t2g.posted_date, date '1900-01-01') approx_origin_date
 , w.wall_date
 , w.wall_price
@@ -144,11 +139,7 @@ left join t2_intv_grpd t2g
 left join wall_media_exact w
 	on t1.author_id = w.author_id
 	and t1.media_id = w.media_id
-where t1.duration > 0
-and not exists (
-	select 1 from unlocked_media u where u.media_id = t1.media_id
-)
-and (
+where (
 	(select count(*) from author_filter) = 0
 	or t1.author_id in (select author_id from author_filter)
 )
@@ -165,11 +156,19 @@ and (
 	or t1.media_id in (select media_id from media_id_filter)
 )
 and (
-	(select last_n_days from origin_days_filter) is null
-	or coalesce(t2g.posted_date, current_date) >= current_date - (select last_n_days from origin_days_filter)
+	(select start_year from origin_year_filter) is null
+	or (
+		year(coalesce(t2g.posted_date, date '1900-01-01'))
+			<= (select start_year from origin_year_filter)
+		and year(coalesce(t2g.posted_date, date '1900-01-01'))
+			>= (select end_year from origin_year_filter)
+	)
 )
--- One row per message (chat_id) that contains the media; re-sent media in newer messages still appears on both rows.
-qualify row_number() over (partition by t1.author_id, t1.media_id, t1.chat_id order by created_date desc) = 1
-order by duration_ratio desc, duration desc
+and (
+	(select include_images from include_images_filter)
+	or coalesce(t1.duration, 0) > 0
+)
+-- One row per unlock message (unlock_id) that contains the media.
+qualify row_number() over (partition by t1.author_id, t1.media_id, t1.unlock_id order by unlock_date desc) = 1
+order by duration_ratio desc nulls last, duration desc nulls last, unlock_date desc
 ;
-

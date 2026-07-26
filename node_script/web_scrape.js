@@ -12,8 +12,9 @@
 // npm install dotenv
 // leftmost web tab is the active one!
 // Login: two passes via ensureLoginViaChatThread — see README "Per-run flow".
-//   initial       — before DuckDB; full chat_thread nav + attemptLogin()
+//   initial       — before DuckDB; full chat_thread nav + stepped attemptLogin() (email→Enter→password)
 //   before scrape — captcha submit if needed; skips re-nav only when .b-chats__scrollbar visible (loginSessionReady)
+//   backup        — waitForManualLoginBackup if automated stepped login / captcha does not finish
 // don't minimize web browser during scrape (restoring, backgrounding is ok)!
 // manually verify and enable remote debugging at chrome://inspect/#remote-debugging
 // verify full chromium command args at chrome://version/
@@ -114,15 +115,73 @@ const isReplMode = process.env.WEB_SCRAPE_REPL === '1' || process.argv.includes(
 function parseScrapeMode() {
     const raw = (process.argv.slice(2).find(a => !a.startsWith('-')) || '').toLowerCase();
     if (['chat', 'chat_thread', 'messages'].includes(raw)) return 'chat';
-    if (['wall', 'wall_posts', 'posts'].includes(raw)) return 'wall';
+    if (['wall', 'wall_posts', 'posts', 'wall_hist', 'wall_historical', 'historical_wall'].includes(raw)) {
+        return 'wall';
+    }
     if (['purchases', 'unlocks', 'chat_unlocks', 'paid_chat'].includes(raw)) return 'purchases';
     if (isReplMode) return null;
-    console.error('Usage: node web_scrape.js <chat|wall|purchases>');
+    console.error('Usage: node web_scrape.js <chat|wall|purchases> [--hist-start=YYYY --hist-end=YYYY]');
     console.error('  chat       — scrape chat thread messages (stg_chat_messages + media_dim)');
     console.error('  wall       — scrape wall posts (stg_wall_posts)');
     console.error('  purchases  — scrape paid chat unlocks (stg_chat_unlocks)');
+    console.error('  wall + --hist-start/--hist-end — historical wall (date-picker jump; end-year stop)');
     console.error('Interactive: node web_scrape_repl.js');
     process.exit(1);
+}
+
+/** Historical wall: startYear = newer, endYear = older (e.g. 2022 → 2019). */
+function getWallHistYears({ exitOnError = true } = {}) {
+    let startRaw = null;
+    let endRaw = null;
+    for (const a of process.argv.slice(2)) {
+        const sm = a.match(/^--hist-start=(\d{4})$/i);
+        const em = a.match(/^--hist-end=(\d{4})$/i);
+        if (sm) startRaw = sm[1];
+        if (em) endRaw = em[1];
+    }
+    if (startRaw == null && (process.env.wall_scrape_hist_start_year || '').trim()) {
+        startRaw = process.env.wall_scrape_hist_start_year.trim();
+    }
+    if (endRaw == null && (process.env.wall_scrape_hist_end_year || '').trim()) {
+        endRaw = process.env.wall_scrape_hist_end_year.trim();
+    }
+    const modeArg = (process.argv.slice(2).find(a => !a.startsWith('-')) || '').toLowerCase();
+    const histModeAlias = ['wall_hist', 'wall_historical', 'historical_wall'].includes(modeArg);
+    if (startRaw == null && endRaw == null && !histModeAlias) return null;
+    if (startRaw == null || endRaw == null) {
+        const msg =
+            'Historical wall scrape requires both years: --hist-start=YYYY --hist-end=YYYY ' +
+            '(start = newer year, end = older year), or wall_scrape_hist_start_year / wall_scrape_hist_end_year in config.env';
+        if (exitOnError) {
+            console.error(msg);
+            process.exit(1);
+        }
+        console.warn(msg);
+        return null;
+    }
+    const startYear = parseInt(startRaw, 10);
+    const endYear = parseInt(endRaw, 10);
+    if (!Number.isFinite(startYear) || !Number.isFinite(endYear) || startYear < 2000 || endYear < 2000) {
+        const msg = `Invalid hist years: start=${startRaw} end=${endRaw}`;
+        if (exitOnError) {
+            console.error(msg);
+            process.exit(1);
+        }
+        console.warn(msg);
+        return null;
+    }
+    if (startYear < endYear) {
+        const msg =
+            `hist start year (${startYear}) must be >= end year (${endYear}) ` +
+            '(start = newer / later calendar year, end = older)';
+        if (exitOnError) {
+            console.error(msg);
+            process.exit(1);
+        }
+        console.warn(msg);
+        return null;
+    }
+    return { startYear, endYear };
 }
 
 const scrapeMode = parseScrapeMode();
@@ -933,6 +992,16 @@ function validateCredsAtStartup() {
     };
     console.log(`${forceBackfillKey}=${flagOn(forceBackfillKey) ? '1' : '0'}`);
     console.log(`scrape_debug=${flagOn('scrape_debug') ? '1' : '0'}`);
+    if (scrapeMode === 'wall') {
+        const hist = getWallHistYears();
+        if (hist) {
+            console.log(
+                `wall historical: start_year=${hist.startYear} (newer) ` +
+                `end_year=${hist.endYear} (older); date-picker jump; high-watermark early quit after jump; ` +
+                `stop when batch newest < ${hist.endYear}-01-01`
+            );
+        }
+    }
 }
 
 validateCredsAtStartup();
@@ -1486,7 +1555,9 @@ async function waitForChatOrLoginUi(timeoutMs = 90000, options = {}) {
                 }
             }
             await page.waitForFunction(
-                () => document.querySelector('.b-chats__scrollbar') || document.querySelector('input[type="email"]'),
+                () => document.querySelector('.b-chats__scrollbar')
+                    || document.querySelector('input[type="email"]')
+                    || document.querySelector('input[name="password"], input[type="password"]'),
                 { timeout: Math.min(15000, remaining) }
             );
             return true;
@@ -1792,17 +1863,61 @@ async function cdpGotoPage(navPage, url, timeout = 75000) {
 
 async function attemptLogin() {
     page = await refreshPageIfDetached(process.env.chat_thread);
-    if (!(await isLoginFormVisible())) {
+    if (await isChatThreadReady()) {
+        console.log('Chat UI ready; skipping login.');
+        return;
+    }
+    if (!(await isEmailFieldVisible()) && !(await isPasswordFieldVisible())) {
         console.log('Login form not visible; assuming an active session and skipping login!');
         return;
     }
     try {
-        await page.waitForSelector('input[type="email"]', { timeout: 5000 });
-        await page.type('input[type="email"]', process.env.of_usern);
-        await page.type('input[name="password"]', process.env.of_paswd);
-        await attemptLoginFormSubmit();
+        // Stepped login: email → Enter → password appears → submit (then captcha).
+        if (await isEmailFieldVisible()) {
+            logStep('Login step 1: email...');
+            await page.waitForSelector('input[type="email"]', { timeout: 10000 });
+            const existing = await page.$eval('input[type="email"]', (el) => el.value || '').catch(() => '');
+            if (existing !== (process.env.of_usern || '')) {
+                await page.click('input[type="email"]', { clickCount: 3 }).catch(() => {});
+                await page.keyboard.press('Backspace').catch(() => {});
+                await page.type('input[type="email"]', process.env.of_usern || '', { delay: 15 });
+            }
+            await page.focus('input[type="email"]').catch(() => {});
+            await page.keyboard.press('Enter');
+            console.log('Pressed Enter after email; waiting for password field...');
+            try {
+                await page.waitForSelector('input[name="password"], input[type="password"]', {
+                    timeout: 30000,
+                    visible: true,
+                });
+            } catch (_) {
+                // Some builds need the form continue button instead of Enter.
+                await attemptLoginFormSubmit();
+                await page.waitForSelector('input[name="password"], input[type="password"]', {
+                    timeout: 20000,
+                    visible: true,
+                });
+            }
+            await sleepMs(600);
+        }
+
+        if (await isPasswordFieldVisible()) {
+            logStep('Login step 2: password...');
+            const pwSelector = (await page.$('input[name="password"]'))
+                ? 'input[name="password"]'
+                : 'input[type="password"]';
+            await page.click(pwSelector, { clickCount: 3 }).catch(() => {});
+            await page.keyboard.press('Backspace').catch(() => {});
+            await page.type(pwSelector, process.env.of_paswd || '', { delay: 15 });
+            await attemptLoginFormSubmit();
+        } else {
+            console.log('Password field did not appear after email; manual login backup may be needed.');
+        }
     } catch (error) {
-      console.log('One or more login inputs not loaded. Assuming an active session and skipping login!');
+        console.log(
+            `Automated login incomplete (${error.message}). ` +
+            'Complete email → Enter → password (+ captcha) in Chromium if prompted.'
+        );
     }
 }
 
@@ -1812,15 +1927,16 @@ async function attemptLoginFormSubmit() {
     try {
         const result = await page.evaluate(() => {
             const email = document.querySelector('input[type="email"]');
-            if (!email) return { ok: false, reason: 'no email field' };
-            const form = email.closest('form');
-            const btn = form?.querySelector('button[type="submit"]');
-            if (!btn) return { ok: false, reason: 'no submit in login form' };
+            const password = document.querySelector('input[name="password"], input[type="password"]');
+            const form = (password || email)?.closest('form');
+            const btn = form?.querySelector('button[type="submit"]')
+                || document.querySelector('button[type="submit"]');
+            if (!btn) return { ok: false, reason: 'no submit button' };
             btn.click();
-            return { ok: true };
+            return { ok: true, step: password ? 'password' : 'email' };
         });
         if (result.ok) {
-            console.log('Clicked login form submit.');
+            console.log(`Clicked login form submit (${result.step || 'form'}).`);
         } else {
             console.log(`Login form submit skipped: ${result.reason}`);
         }
@@ -1850,17 +1966,75 @@ async function isChatThreadReady() {
     }
 }
 
-async function isLoginFormVisible() {
+async function isEmailFieldVisible() {
     try {
-        return !!(await page.$('input[type="email"]')) && !!(await page.$('input[name="password"]'));
+        return !!(await page.$('input[type="email"]'));
     } catch {
         return false;
     }
 }
 
+async function isPasswordFieldVisible() {
+    try {
+        return !!(await page.$('input[name="password"], input[type="password"]'));
+    } catch {
+        return false;
+    }
+}
+
+/** True when any login step is showing (email-only or password), and chat UI is not ready. */
+async function isLoginFormVisible() {
+    try {
+        if (await isChatThreadReady()) return false;
+        return (await isEmailFieldVisible()) || (await isPasswordFieldVisible());
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Backup when automated stepped login / captcha does not finish:
+ * wait for the user to complete email → password (+ captcha) in Chromium.
+ */
+async function waitForManualLoginBackup(options = {}) {
+    const waitMs = options.waitMs ?? 300000;
+    page = await refreshPageIfDetached(process.env.chat_thread).catch(() => page);
+    if (await isChatThreadReady()) return true;
+    if (await isLoggedInOnChatThread().catch(() => false)) return true;
+
+    console.log(
+        'Waiting for manual login in Chromium (email → Enter → password, then captcha if shown). ' +
+        `Up to ${Math.round(waitMs / 1000)}s...`
+    );
+    const deadline = Date.now() + waitMs;
+    let lastLogMs = 0;
+    while (Date.now() < deadline) {
+        page = await refreshPageIfDetached(process.env.chat_thread).catch(() => page);
+        if (await isChatThreadReady()) {
+            console.log('Manual login complete (chat UI ready).');
+            return true;
+        }
+        if (await isLoggedInOnChatThread().catch(() => false)) {
+            console.log('Manual login complete (authenticated on chat thread).');
+            return true;
+        }
+        const now = Date.now();
+        if (now - lastLogMs >= 30000) {
+            console.log(
+                `Still waiting for manual login (${Math.round((deadline - now) / 1000)}s left)...`
+            );
+            lastLogMs = now;
+        }
+        await sleepMs(2500);
+    }
+    console.log('Manual login wait timed out.');
+    return false;
+}
+
 async function attemptLoginSubmitAfterCaptchaIfNeeded(options = {}) {
     const captchaWaitMs = options.captchaWaitMs ?? 90000;
     const submitIntervalMs = options.submitIntervalMs ?? 10000;
+    const manualWaitMs = options.manualWaitMs ?? 300000;
 
     if (await isChatThreadReady()) {
         console.log('Chat thread UI ready; skipping login submit.');
@@ -1872,9 +2046,9 @@ async function attemptLoginSubmitAfterCaptchaIfNeeded(options = {}) {
     }
 
     console.log(
-        'Login form visible — captcha may auto-resolve or need manual solve in Chromium. ' +
-        `Re-submitting login form every ${Math.round(submitIntervalMs / 1000)}s ` +
-        `(up to ${Math.round(captchaWaitMs / 1000)}s)...`
+        'Login UI visible — finish captcha / stepped login in Chromium if needed. ' +
+        `Auto re-submit every ${Math.round(submitIntervalMs / 1000)}s ` +
+        `(up to ${Math.round(captchaWaitMs / 1000)}s), then manual wait...`
     );
 
     const deadline = Date.now() + captchaWaitMs;
@@ -1888,27 +2062,40 @@ async function attemptLoginSubmitAfterCaptchaIfNeeded(options = {}) {
         if (!(await isLoginFormVisible())) {
             console.log('Login form cleared; waiting for chat UI...');
             await waitForChatOrLoginUi(Math.min(45000, deadline - Date.now()));
-            return;
+            if (await isChatThreadReady() || await isLoggedInOnChatThread().catch(() => false)) return;
+            break;
         }
 
         const now = Date.now();
-        if (lastSubmitMs === 0 || now - lastSubmitMs >= submitIntervalMs) {
-            console.log('Submitting login form (captcha may have auto-resolved)...');
-            await attemptLoginFormSubmit();
-            lastSubmitMs = now;
-            await sleepMs(3000);
-            continue;
+        // Only auto-submit once the password step is showing (avoid re-submitting email-only).
+        if (await isPasswordFieldVisible()) {
+            if (lastSubmitMs === 0 || now - lastSubmitMs >= submitIntervalMs) {
+                console.log('Submitting login form (password step; captcha may have auto-resolved)...');
+                await attemptLoginFormSubmit();
+                lastSubmitMs = now;
+                await sleepMs(3000);
+                continue;
+            }
+        } else if (await isEmailFieldVisible()) {
+            // Email step still up — do not hammer submit; user/automation may still be mid-flow.
+            if (lastSubmitMs === 0) {
+                console.log('Email step still visible; waiting for password field or manual progress...');
+                lastSubmitMs = now;
+            }
         }
 
         await sleepMs(2000);
     }
 
     if (await isChatThreadReady()) return;
-    if (await isLoginFormVisible()) {
+    if (await isPasswordFieldVisible()) {
         console.log('Final login form submit after captcha wait...');
         await attemptLoginFormSubmit();
         await waitForChatOrLoginUi(45000);
     }
+    if (await isChatThreadReady() || await isLoggedInOnChatThread().catch(() => false)) return;
+
+    await waitForManualLoginBackup({ waitMs: manualWaitMs });
 }
 
 // await attemptLoginSubmit();
@@ -1999,16 +2186,16 @@ async function ensureLoginViaChatThread(label) {
         }
         try {
             page = await ensureLiveBrowserPage(process.env.chat_thread);
-            if (await isLoginFormVisible()) {
-                logStep('Login form visible; entering credentials.');
-                await page.type('input[type="email"]', process.env.of_usern).catch(() => {});
-                await page.type('input[name="password"]', process.env.of_paswd).catch(() => {});
-                await attemptLoginFormSubmit();
+            if ((await isEmailFieldVisible()) || (await isPasswordFieldVisible())) {
+                logStep('Login form visible; running stepped credential login.');
+                await attemptLogin();
             } else {
                 console.log('Login form not visible; assuming active session.');
             }
+            await attemptLoginSubmitAfterCaptchaIfNeeded({
+                captchaWaitMs: scrapeMode === 'chat' ? 120000 : 90000,
+            });
             if (scrapeMode === 'chat') {
-                await attemptLoginSubmitAfterCaptchaIfNeeded({ captchaWaitMs: 120000 });
                 if (!(await isChatThreadReady())) {
                     await waitForChatOrLoginUi(60000);
                 }
@@ -2057,13 +2244,10 @@ async function ensureLoginViaChatThread(label) {
             }
             page = await refreshPageIfDetached(process.env.chat_thread);
             await attemptLogin();
-            if (label === 'before scrape' || (label === 'initial' && scrapeMode === 'chat')) {
-                await attemptLoginSubmitAfterCaptchaIfNeeded({
-                    captchaWaitMs: label === 'initial' ? 120000 : 90000,
-                });
-            } else if (!authOnly) {
-                await sleepMs(3000);
-            }
+            // Stepped login + captcha; falls back to waiting for manual email/password if needed.
+            await attemptLoginSubmitAfterCaptchaIfNeeded({
+                captchaWaitMs: label === 'initial' ? 120000 : 90000,
+            });
             page = await refreshPageIfDetached(process.env.chat_thread);
             if (scrapeMode === 'chat' && !(await isChatThreadReady())) {
                 logStep('Waiting for chat thread UI after login/captcha...');
@@ -2094,11 +2278,9 @@ async function ensureLoginViaChatThread(label) {
                 try {
                     page = await ensureLiveBrowserPage(process.env.chat_thread);
                     await attemptLogin();
-                    if (label === 'before scrape' || (label === 'initial' && scrapeMode === 'chat')) {
-                        await attemptLoginSubmitAfterCaptchaIfNeeded({
-                            captchaWaitMs: label === 'initial' ? 120000 : 90000,
-                        });
-                    }
+                    await attemptLoginSubmitAfterCaptchaIfNeeded({
+                        captchaWaitMs: label === 'initial' ? 120000 : 90000,
+                    });
                     loginSessionReady = scrapeMode === 'chat'
                         ? await isChatThreadReady()
                         : await isLoggedInOnChatThread();
@@ -2602,12 +2784,24 @@ async function ensureScrapeExpiredColumn(connection, tableName) {
     }
 }
 
+/** Wall PPV unlock price from API `price` (distinct from tipsAmount). */
+async function ensureWallPostsPriceColumn(connection) {
+    try {
+        await connection.run(`ALTER TABLE stg_wall_posts ADD COLUMN IF NOT EXISTS price DOUBLE`);
+    } catch (err) {
+        if (!/does not exist|Catalog Error/i.test(String(err.message))) {
+            throw err;
+        }
+    }
+}
+
 async function ensureScrapeExpiredColumns() {
     const connection = await instance.connect();
     try {
         for (const tableName of ['stg_chat_messages', 'stg_wall_posts']) {
             await ensureScrapeExpiredColumn(connection, tableName);
         }
+        await ensureWallPostsPriceColumn(connection);
     } finally {
         await connection.disconnectSync();
     }
@@ -2820,6 +3014,8 @@ function evaluateScrapeBatchStop({
     getBatchMinMax,
     label,
     onStop,
+    cutoffStopReason = 'cutoff',
+    cutoffLabel = null,
 }) {
     const inWindowList = inWindow?.length ? inWindow : [];
     const { maxMs: batchNewestRawMs } = getBatchMinMax(trimmed);
@@ -2828,11 +3024,13 @@ function evaluateScrapeBatchStop({
         console.log(`${label} API hasMore=false; stopping scroll.`);
         onStop('hasMore');
     } else if (batchNewestRawMs != null && batchNewestRawMs < minWindowMs) {
+        const boundLabel = cutoffLabel
+            || `${maxAgeDays}-day cutoff ${new Date(minWindowMs).toISOString()}`;
         console.log(
             `Batch newest ${new Date(batchNewestRawMs).toISOString()} ` +
-            `is before ${maxAgeDays}-day cutoff ${new Date(minWindowMs).toISOString()}; stopping ${label} scroll.`
+            `is before ${boundLabel}; stopping ${label} scroll.`
         );
-        onStop('cutoff');
+        onStop(cutoffStopReason);
     } else if (
         !forceBackfill &&
         highWatermarkMs != null &&
@@ -2857,12 +3055,19 @@ function filterWallPostsByMinPostedAt(list, minPostedAtMs) {
     });
 }
 
-async function getWallPostedAtBoundsMs(authorId, minPostedAtMs) {
+async function getWallPostedAtBoundsMs(authorId, minPostedAtMs, maxPostedAtMs = null) {
     const safeId = String(authorId || '').replace(/\D/g, '');
     if (!safeId) return { minMs: null, maxMs: null, absMinMs: null, windowCount: 0, totalCount: 0 };
     const windowTs = minPostedAtMs != null
         ? new Date(minPostedAtMs).toISOString().replace('T', ' ').replace('Z', '')
         : null;
+    const windowMaxTs = maxPostedAtMs != null
+        ? new Date(maxPostedAtMs).toISOString().replace('T', ' ').replace('Z', '')
+        : null;
+    const inWindowPred = windowMaxTs
+        ? `cast(postedAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}' ` +
+          `AND cast(postedAt AS timestamp) <= timestamp '${windowMaxTs}'`
+        : `cast(postedAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}'`;
     const connection = await instance.connect();
     try {
         let authorWhere = '';
@@ -2873,9 +3078,9 @@ async function getWallPostedAtBoundsMs(authorId, minPostedAtMs) {
         }
         const reader = await connection.runAndReadAll(`
             SELECT
-                min(cast(postedAt AS timestamp)) FILTER (WHERE cast(postedAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_min_ts,
-                max(cast(postedAt AS timestamp)) FILTER (WHERE cast(postedAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_max_ts,
-                count(*) FILTER (WHERE cast(postedAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_cnt,
+                min(cast(postedAt AS timestamp)) FILTER (WHERE ${inWindowPred}) AS win_min_ts,
+                max(cast(postedAt AS timestamp)) FILTER (WHERE ${inWindowPred}) AS win_max_ts,
+                count(*) FILTER (WHERE ${inWindowPred}) AS win_cnt,
                 min(cast(postedAt AS timestamp)) AS abs_min_ts,
                 count(*) AS total_cnt
             FROM stg_wall_posts
@@ -3325,6 +3530,7 @@ async function loadWallPostsToDb(filePath, tableName, jsonResp) {
     const duckPath = duckDbJsonPath(filePath);
     try {
         await ensureScrapeExpiredColumn(connection, tableName);
+        await ensureWallPostsPriceColumn(connection);
     	insertParts = await getTgtInsertParts(connection, tableName, 'wp', filePath);
         // Read json file and insert into pre-existing table
         insertTableSql = `INSERT INTO ${tableName} (${insertParts.colList}) SELECT ${insertParts.selectStr} FROM read_json_auto('${duckPath}', union_by_name=true) wp
@@ -3631,6 +3837,177 @@ async function scrapeChatMessages() {
     }
 }
 
+/**
+ * Open wall GUI date picker ("Go to date") and jump to earliest valid day of startYear
+ * (posts at/older than that date).
+ */
+async function jumpWallDatePickerToStartYear(startYear) {
+    const targetUrl = process.env.wall_profile || '';
+    logStep(`Wall date picker: jump to earliest date of ${startYear}...`);
+
+    async function runPickerStep(label, pageFn, arg = {}) {
+        const deadline = Date.now() + 60000;
+        let lastErr = 'not ready';
+        while (Date.now() < deadline) {
+            page = await refreshPageIfDetached(targetUrl).catch(() => page);
+            let result;
+            try {
+                result = await page.evaluate(pageFn, arg);
+            } catch (err) {
+                lastErr = err.message;
+                result = { ok: false, error: err.message };
+            }
+            if (result?.ok) {
+                console.log(
+                    `Date picker ${label}: OK` +
+                    (result.detail ? ` (${result.detail})` : '')
+                );
+                return result;
+            }
+            lastErr = result?.error || lastErr;
+            console.log(
+                `Date picker ${label}: waiting (${Math.round((deadline - Date.now()) / 1000)}s left) — ${lastErr}`
+            );
+            await sleepMs(1500);
+        }
+        throw new Error(`Wall date picker failed at "${label}": ${lastErr}`);
+    }
+
+    await runPickerStep('open dropdown', () => {
+        const el = document.getElementsByClassName(
+            'btn dropdown-toggle m-with-hover-highlight has-tooltip'
+        )[1];
+        if (!el) {
+            return { ok: false, error: 'date filter dropdown toggle [1] not found' };
+        }
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        el.click();
+        return { ok: true };
+    });
+    await sleepMs(500);
+
+    await runPickerStep('Go to date', () => {
+        // Dropdown may already have opened the calendar on some layouts.
+        if (document.querySelector('.vdatetime-popup, .vdatetime-calendar, .vdatetime-year-picker')) {
+            return { ok: true, detail: 'calendar already open' };
+        }
+
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const want = 'go to date';
+        const candidates = [
+            ...document.querySelectorAll('label, button, a, [role="menuitem"], li, span, div'),
+        ];
+        for (const el of candidates) {
+            const text = norm(el.innerText || el.textContent);
+            // Prefer leaf-ish nodes: skip huge containers that merely contain the phrase.
+            if (!text || text.length > 48) continue;
+            if (text !== want && !text.includes(want)) continue;
+            // Prefer a small clickable ancestor (menu row), not the whole page.
+            const clickable =
+                el.closest('button, a, [role="menuitem"], li, .dropdown-item') || el;
+            clickable.scrollIntoView({ block: 'center', inline: 'center' });
+            clickable.click();
+            return {
+                ok: true,
+                detail: `${clickable.tagName.toLowerCase()}.${(clickable.className || '').toString().slice(0, 60)}`,
+            };
+        }
+
+        const menuHints = candidates
+            .map((el) => norm(el.innerText || el.textContent))
+            .filter((t) => t && t.length < 40 && /date|go|calendar|jump/i.test(t))
+            .slice(0, 12);
+        return {
+            ok: false,
+            error: `Go to date not found; hints: ${menuHints.join(' | ') || 'none'}`,
+        };
+    });
+    await sleepMs(800);
+
+    await runPickerStep('year header', () => {
+        const el = document.getElementsByClassName('vdatetime-popup__year')[0];
+        if (!el) return { ok: false, error: 'vdatetime-popup__year not found' };
+        el.click();
+        return { ok: true };
+    });
+    await sleepMs(500);
+
+    await runPickerStep('select year', ({ year }) => {
+        const years = Array.from(document.getElementsByClassName('vdatetime-year-picker__item'))
+            .filter((el) => !el.className.includes('--disabled'));
+        const wanted = String(year);
+        let el = years.find((y) => (y.textContent || '').trim() === wanted);
+        if (!el) {
+            const parsed = years
+                .map((y) => ({ el: y, y: parseInt((y.textContent || '').trim(), 10) }))
+                .filter((x) => Number.isFinite(x.y))
+                .sort((a, b) => b.y - a.y);
+            el = (parsed.find((x) => x.y <= year) || parsed[0])?.el;
+        }
+        if (!el) {
+            return {
+                ok: false,
+                error: `year ${year} not in picker`,
+                detail: years.map((y) => (y.textContent || '').trim()).join(','),
+            };
+        }
+        el.scrollIntoView({ block: 'center' });
+        el.click();
+        return { ok: true, detail: (el.textContent || '').trim() };
+    }, { year: startYear });
+    await sleepMs(500);
+
+    await runPickerStep('month header', () => {
+        const el = document.getElementsByClassName('vdatetime-popup__date')[0];
+        if (!el) return { ok: false, error: 'vdatetime-popup__date not found' };
+        el.click();
+        return { ok: true };
+    });
+    await sleepMs(500);
+
+    await runPickerStep('select month', () => {
+        const months = Array.from(document.getElementsByClassName('vdatetime-month-picker__item'))
+            .filter((el) => !el.className.includes('--disabled'));
+        if (!months.length) return { ok: false, error: 'no enabled months' };
+        months[0].click();
+        return { ok: true, detail: (months[0].textContent || '').trim() };
+    });
+    await sleepMs(500);
+
+    await runPickerStep('confirm month', () => {
+        const wrap = document.getElementsByClassName(
+            'vdatetime-popup__actions__button vdatetime-popup__actions__button--confirm'
+        )[0];
+        const btn = wrap && wrap.querySelector(':scope > button');
+        if (!btn) return { ok: false, error: 'confirm button not found' };
+        btn.click();
+        return { ok: true };
+    });
+    await sleepMs(800);
+
+    await runPickerStep('select day', () => {
+        const days = Array.from(document.getElementsByClassName('vdatetime-calendar__month__day'))
+            .filter((el) => !el.className.includes('--disabled'));
+        if (!days.length) return { ok: false, error: 'no enabled days' };
+        days[0].click();
+        return { ok: true, detail: (days[0].textContent || '').trim().replace(/\s+/g, ' ') };
+    });
+    await sleepMs(500);
+
+    await runPickerStep('confirm day', () => {
+        const wrap = document.getElementsByClassName(
+            'vdatetime-popup__actions__button vdatetime-popup__actions__button--confirm'
+        )[0];
+        const btn = wrap && wrap.querySelector(':scope > button');
+        if (!btn) return { ok: false, error: 'confirm button not found' };
+        btn.click();
+        return { ok: true };
+    });
+
+    await sleepMs(4000);
+    logStep(`Wall date picker jump to ${startYear} complete; resuming scroll for older posts...`);
+}
+
 async function scrapeWallPosts() {
 let needToScrollDn = true;
     let wallStopReason = null;
@@ -3638,11 +4015,21 @@ let needToScrollDn = true;
     let scrollCount = 0;
     const enqueueWallBatch = createBatchQueue();
     const authorId = getAuthorIdFromCreds();
-    const wallMinPostedAtMs = getWallScrapeMinPostedAtMs();
-    const wallMaxAgeDays = process.env.wall_scrape_max_age_days || '730';
-    const wallForceBackfill = isWallScrapeForceBackfillEnabled();
+    const hist = getWallHistYears({ exitOnError: scrapeMode === 'wall' });
+    const wallMinPostedAtMs = hist
+        ? Date.UTC(hist.endYear, 0, 1)
+        : getWallScrapeMinPostedAtMs();
+    const wallMaxAgeDays = hist
+        ? `hist-${hist.endYear}-${hist.startYear}`
+        : (process.env.wall_scrape_max_age_days || '730');
+    // Historical: suppress high-watermark until date-picker jump (landing batches are recent);
+    // after jump, use the same early quit as regular wall (unless force_backfill).
+    // Never soft-delete on historical runs.
+    const wallForceBackfillFlag = isWallScrapeForceBackfillEnabled();
+    let histSkipHighWatermark = !!hist;
+    const wallExpireEnabled = !hist && wallForceBackfillFlag;
     const seenWallPostIds = new Set();
-    const wallExpireTracker = wallForceBackfill
+    const wallExpireTracker = wallExpireEnabled
         ? createBackfillExpireOnOlderBatch({
             tableName: 'stg_wall_posts',
             authorId,
@@ -3655,11 +4042,21 @@ let needToScrollDn = true;
         : null;
 
     logStep('Reading wall postedAt bounds from DuckDB (before navigation)...');
-    console.log(
-        `Wall scrape window: postedAt >= ${new Date(wallMinPostedAtMs).toISOString()} ` +
-        `(wall_scrape_max_age_days=${wallMaxAgeDays})`
-    );
-    if (wallForceBackfill) {
+    if (hist) {
+        console.log(
+            `Wall historical scrape: start_year=${hist.startYear} (newer) end_year=${hist.endYear} (older); ` +
+            `insert/stop window postedAt >= ${new Date(wallMinPostedAtMs).toISOString()}; ` +
+            `date-picker jump after profile load; high-watermark early quit after jump` +
+            (wallForceBackfillFlag ? ' (disabled: wall_scrape_force_backfill=1)' : '') +
+            `; no force-backfill expire`
+        );
+    } else {
+        console.log(
+            `Wall scrape window: postedAt >= ${new Date(wallMinPostedAtMs).toISOString()} ` +
+            `(wall_scrape_max_age_days=${wallMaxAgeDays})`
+        );
+    }
+    if (wallExpireEnabled) {
         console.log(
             'wall_scrape_force_backfill=1: high-watermark stop disabled; ' +
             'scrolling until 730-day cutoff or hasMore=false (maiden-style gap backfill). ' +
@@ -3667,15 +4064,25 @@ let needToScrollDn = true;
             'final unseen sweep on full API stop. Watch "earliest expired mark date" to Ctrl+C early.'
         );
     }
-    const wallBounds = await getWallPostedAtBoundsMs(authorId, wallMinPostedAtMs);
+    const histJumpMs = hist ? Date.UTC(hist.startYear, 0, 1) : null;
+    // Historical early quit must not use recent (post-jump) DB max — only posts at/before start-year jump.
+    const wallBounds = await getWallPostedAtBoundsMs(authorId, wallMinPostedAtMs, histJumpMs);
     const wallLowWatermarkMs = wallBounds.minMs;
     const wallHighWatermarkMs = wallBounds.maxMs;
-    const wallStopHint = wallForceBackfill
-        ? 'scroll down until 730-day cutoff or hasMore=false (force backfill)'
-        : 'scroll down until batch is older than DB high watermark with no new rows, 730-day cutoff, or hasMore=false';
+    const wallStopHint = hist
+        ? (
+            wallForceBackfillFlag
+                ? `scroll down until batch newest is older than ${hist.endYear}-01-01, or hasMore=false (force backfill)`
+                : `scroll down until hist high-watermark early quit (DB max in ${hist.endYear}..${hist.startYear}-01-01, no new rows), end year, or hasMore=false`
+        )
+        : wallForceBackfillFlag
+            ? 'scroll down until 730-day cutoff or hasMore=false (force backfill)'
+            : 'scroll down until batch is older than DB high watermark with no new rows, 730-day cutoff, or hasMore=false';
     if (wallLowWatermarkMs != null && wallHighWatermarkMs != null) {
-        let boundsMsg =
-            `Wall DB bounds for ${authorId} (within ${wallMaxAgeDays}-day window): ` +
+        let boundsMsg = hist
+            ? `Wall DB hist bounds for ${authorId} (${hist.endYear}-01-01 .. ${hist.startYear}-01-01): `
+            : `Wall DB bounds for ${authorId} (within ${wallMaxAgeDays} window): `;
+        boundsMsg +=
             `${new Date(wallLowWatermarkMs).toISOString()} .. ${new Date(wallHighWatermarkMs).toISOString()} ` +
             `[${wallBounds.windowCount} posts`;
         if (wallBounds.totalCount > wallBounds.windowCount) {
@@ -3685,8 +4092,11 @@ let needToScrollDn = true;
         console.log(boundsMsg);
     } else if (wallBounds.totalCount > 0) {
         console.log(
-            `Wall DB has ${wallBounds.totalCount} posts for ${authorId} but none within ${wallMaxAgeDays}-day window; ` +
-            `scrolling until cutoff or hasMore=false.`
+            hist
+                ? `Wall DB has ${wallBounds.totalCount} posts for ${authorId} but none in hist range ${hist.endYear}..${hist.startYear}-01-01; ` +
+                  `scrolling until end year or hasMore=false.`
+                : `Wall DB has ${wallBounds.totalCount} posts for ${authorId} but none within ${wallMaxAgeDays} window; ` +
+                  `scrolling until cutoff or hasMore=false.`
         );
     } else {
         console.log(`No existing wall posts for author ${authorId}; scrolling until cutoff or hasMore=false.`);
@@ -3701,10 +4111,14 @@ let needToScrollDn = true;
             minWindowMs: wallMinPostedAtMs,
             maxAgeDays: wallMaxAgeDays,
             highWatermarkMs: wallHighWatermarkMs,
-            forceBackfill: wallForceBackfill,
+            forceBackfill: histSkipHighWatermark || wallForceBackfillFlag,
             getBatchMinMax: getBatchMinMaxPostedAtMs,
             label: 'Wall',
             onStop: (reason) => { needToScrollDn = false; wallStopReason = reason; },
+            cutoffStopReason: hist ? 'end_year' : 'cutoff',
+            cutoffLabel: hist
+                ? `end year ${hist.endYear} (${new Date(wallMinPostedAtMs).toISOString()})`
+                : null,
         });
     }
 
@@ -3720,7 +4134,7 @@ let needToScrollDn = true;
                 const { minMs: batchMinMs, maxMs: batchMaxMs } = getBatchMinMaxPostedAtMs(trimmed);
                 const list = filterWallPostsByMinPostedAt(trimmed, wallMinPostedAtMs);
                 console.log(
-                    `Wall API batch: ${trimmed.length} posts (${list.length} within ${wallMaxAgeDays}-day window)` +
+                    `Wall API batch: ${trimmed.length} posts (${list.length} within ${wallMaxAgeDays} window)` +
                     (batchMaxMs != null ? `, newest ${new Date(batchMaxMs).toISOString()}` : '') +
                     (batchMinMs != null ? `, oldest ${new Date(batchMinMs).toISOString()}` : '')
                 );
@@ -3759,6 +4173,18 @@ let needToScrollDn = true;
         await navigateScrapeTarget(process.env.wall_profile, 'wall profile', 'wall_profile', {
             blockOyfHome: true,
         });
+        if (hist) {
+            // Landing may have stopped only on hasMore; reset so we scroll after the date jump.
+            needToScrollDn = true;
+            wallStopReason = null;
+            await jumpWallDatePickerToStartYear(hist.startYear);
+            histSkipHighWatermark = false;
+            console.log(
+                wallForceBackfillFlag
+                    ? 'Historical date jump done; high-watermark early quit still disabled (wall_scrape_force_backfill=1).'
+                    : 'Historical date jump done; high-watermark early quit enabled (same as regular wall).'
+            );
+        }
         if (needToScrollDn) {
             logStep('Wall profile loaded; starting scroll for older posts...');
         } else {
@@ -3777,7 +4203,7 @@ let needToScrollDn = true;
         page.off('response', onWallResponse);
         await waitInFlightHandlers(() => wallResponsesInFlight);
         await enqueueWallBatch(() => {});
-        if (wallForceBackfill) {
+        if (wallExpireEnabled) {
             if (isNaturalScrapeStopReason(wallStopReason) && !wallEndedAtSafetyCap) {
                 await expireUnseenScrapeRows({
                     tableName: 'stg_wall_posts',
@@ -4057,6 +4483,7 @@ function buildReplContext() {
         attemptLogin,
         attemptLoginSubmit,
         attemptLoginSubmitAfterCaptchaIfNeeded,
+        waitForManualLoginBackup,
         loadChatToDb,
         loadWallPostsToDb,
         loadChatUnlocksToDb,
@@ -4096,9 +4523,25 @@ await shutdownAfterSuccess(scrapeMode);
 }
 
 if (require.main === module) {
+    async function pauseEnterOnError() {
+        if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+        // Historical PS1 launcher already pauses; skip double Enter when it sets this.
+        if (isTruthyCredsEnv(process.env.WALL_HIST_NO_NODE_PAUSE)) return;
+        const hist = getWallHistYears({ exitOnError: false });
+        if (!hist) return;
+        const readline = require('readline');
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        await new Promise((resolve) => {
+            rl.question('Press Enter to exit ', () => {
+                rl.close();
+                resolve();
+            });
+        });
+    }
+
     process.on('unhandledRejection', (err) => {
         console.error('Unhandled rejection:', err);
-        process.exit(1);
+        pauseEnterOnError().finally(() => process.exit(1));
     });
     if (process.argv.includes('--repl')) {
         require('./web_scrape_repl.js').startWebScrapeRepl().catch(err => {
@@ -4108,7 +4551,7 @@ if (require.main === module) {
     } else {
         main().catch(err => {
             console.error(err);
-            process.exit(1);
+            pauseEnterOnError().finally(() => process.exit(1));
         });
     }
 }

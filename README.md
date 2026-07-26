@@ -100,6 +100,8 @@ Control which creator is scraped by setting the active `chat_thread` and `wall_p
 
 **Scrape time window:** set `wall_scrape_max_age_days` in `data/config.env` (default **730** ≈ 2 years). **One key** controls scroll bounds and the oldest-batch cutoff for **wall**, **chat**, and **purchases** — there are no separate chat/purchases keys. Example: `wall_scrape_max_age_days=365` limits scraping to the last year. Change the value, save `config.env`, then run the scraper again. Rows already in `web.db` that are older than the new window are **not** deleted automatically.
 
+**Historical wall (optional):** prefer `local_run/scrape_wall_historical.ps1` (prompts for years) or CLI `--hist-start` / `--hist-end`. Env alternatives: `wall_scrape_hist_start_year`, `wall_scrape_hist_end_year`.
+
 **Comment lines:** `web_scrape.js` uses `loadConfigEnv()` which skips blank lines and lines starting with `#` or `//` before parsing. Comment out inactive authors with `//` (or `#`) so only the active URLs are loaded into `process.env`.
 
 **Switch author (one-click):** `local_run/local_setup/set_config_author.ps1` uncomments the matching `chat_thread` + `wall_profile` pair for an `author_id` and comments out all other author pairs. Writes `data/config.env.bak` before updating.
@@ -169,6 +171,15 @@ CREATE TABLE IF NOT EXISTS media_dim_history AS SELECT * FROM media_dim WHERE fa
 
 Sample JSON: DevTools → Network → chat/posts XHR → copy the `list` array.
 
+**Staging schema evolution:** startup / wall load runs a few `ADD COLUMN IF NOT EXISTS` helpers today (`expired_ts` on chat+wall; wall PPV **`price`** `DOUBLE`). That is fine for a handful of columns; it does **not** scale for ongoing API field adds/renames/deletes (no column drops, no type reshape, no backfill of existing rows).
+
+- **New columns on future inserts:** once the column exists, `INSERT … SELECT` from `read_json_auto` maps matching JSON keys (e.g. wall `price`).
+- **Existing rows:** ID dedup skips re-insert, so old rows stay `NULL` for new fields until you **delete** the affected slice and **re-scrape** (preferred over per-field `UPDATE` patches).
+- **Preferred backfill:** delete author (or date-window) rows from `stg_wall_posts` / chat as needed, then wall/chat/historical scrape so loads rewrite the full payload into the current schema.
+- **Longer term:** a desired-column list or recreate-table + reload scales better than stacking one-off `ALTER` ensurers.
+
+**Wall money fields:** API **`price`** = PPV unlock (stored as `stg_wall_posts.price`; origin reports use it as `wall_price`). API **`tipsAmount`** = tips (string like `$5`; kept separately — do not coalesce with `price`).
+
 ### 5. dbt (optional)
 
 ```powershell
@@ -186,17 +197,19 @@ dbt test --project-dir webDataELT --profiles-dir .
 ```powershell
 node node_script/web_scrape.js chat        # stg_chat_messages + media_dim
 node node_script/web_scrape.js wall        # stg_wall_posts
+node node_script/web_scrape.js wall --hist-start=2022 --hist-end=2019   # historical wall (date-picker jump)
 node node_script/web_scrape.js purchases   # stg_chat_unlocks (paid chat unlocks)
 node node_script/web_scrape_repl.js        # interactive REPL (all modes)
 node node_script/web_scrape.js --repl      # same as web_scrape_repl.js
 ```
 
-Aliases: `chat_thread` / `messages`; `wall_posts` / `posts`; `unlocks` / `chat_unlocks` / `paid_chat`.
+Aliases: `chat_thread` / `messages`; `wall_posts` / `posts` / `wall_hist`; `unlocks` / `chat_unlocks` / `paid_chat`.
 
 | Launcher | Runs |
 |----------|------|
 | `local_run/scrape_chat.ps1` | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
 | `local_run/scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
+| `local_run/scrape_wall_historical.ps1` | Prompts for start (newer) / end (older) years → `wall --hist-start=… --hist-end=…` |
 | `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases`; then `run_media_origin_tracker_by_days_purchases.ps1` |
 | `local_run/local_setup/add_config_author.ps1` | Interactive add author URLs + create `set_config_author_<author_id>.ps1` |
 | `local_run/local_setup/set_config_author.ps1` | Activate one author in `data/config.env` (`chat_thread` + `wall_profile` pair) |
@@ -273,7 +286,7 @@ If a click misses, set the matching selector in `config.env` to the live CSS id/
 ### Per-run flow
 
 1. Before launch, clears Chrome session-restore files and sets `restore_on_startup=4` (single new tab; cookies kept in `testChromeSession/`). Picks the first stable launch tab — never calls `newPage()` during startup.
-2. **Login pass 1 — `initial`** (before DuckDB): opens `chat_thread`, waits for chat UI or login form, runs `attemptLogin()`, focuses the browser window once.
+2. **Login pass 1 — `initial`** (before DuckDB): opens `chat_thread`, waits for chat UI or login form, runs stepped `attemptLogin()` (**email → Enter → password** when the password field appears), focuses the browser window once. If automation stalls, waits up to **5 minutes** for **manual** email/password (+ captcha) in Chromium.
 3. Opens `web.db` once (`DuckDBInstance.create`).
 4. **Login pass 2 — `before scrape`** (immediately before the scrape mode):
    - Skips full chat-thread reload **only** when pass 1 left `.b-chats__scrollbar` visible (`loginSessionReady`); still runs post-captcha submit if needed.
@@ -333,7 +346,7 @@ Then rerun `node node_script/web_scrape.js chat` or `wall`.
 
 Maps chat `media_id` to an approximate wall-post date (`approx_origin_date`) by comparing media ID bands on wall posts. Each output row is one **message** that contains the media (deduped on `(author_id, media_id, chat_id)` internally). If the same `media_id` was sent in multiple messages, **all** matching messages appear (not just the latest).
 
-**Output columns:** `msg_text`, `created_date`, `media_id`, `duration`, `msg_price`, `n_media`, `duration_ratio`, `approx_origin_date`, plus when the same `media_id` appears on the wall: `wall_date`, `wall_price` (staging `tipsAmount`; no separate PPV price column today), `wall_text` (null if not on wall).
+**Output columns:** `msg_text`, `created_date`, `media_id`, `duration`, `msg_price`, `n_media`, `duration_ratio`, `approx_origin_date`, plus when the same `media_id` appears on the wall: `wall_date`, `wall_price` (staging PPV `price`; distinct from `tipsAmount`), `wall_text` (null if not on wall).
 
 **Dedup:** `QUALIFY` keeps one row per `(author_id, media_id, chat_id)` — re-sent promo clips in newer messages no longer collapse to a single “latest” row. `author_id` / `chat_id` are not selected in the report output.
 
@@ -357,16 +370,21 @@ Built-in optional filters (edit CTEs in the SQL file, or let PS1 inject values):
 
 ### Purchases / unlocked media origin
 
-**SQL:** `sql_script/media_origin_date_tracker_multi_author_purchases.sql` — same wall-band `approx_origin_date` logic, but sources **`stg_chat_unlocks`** (purchased media). Output: `msg_text`, `unlock_date`, `media_id`, `duration`, `msg_price`, `n_media`, `duration_ratio`, `approx_origin_date`, plus `wall_date` / `wall_price` / `wall_text` when that `media_id` is also on the wall (`author_id` / `unlock_id` used for dedup only, not selected).
+**SQL:** `sql_script/media_origin_date_tracker_multi_author_purchases.sql` — same wall-band `approx_origin_date` logic, but sources **`stg_chat_unlocks`** (purchased media). **Videos only** (`duration > 0`). Output: `msg_text`, `unlock_date`, `media_id`, `duration`, `msg_price`, `n_media`, `duration_ratio`, `approx_origin_date`, plus `wall_date` / `wall_price` / `wall_text` when that `media_id` is also on the wall (`author_id` / `unlock_id` used for dedup only, not selected).
 
-**Note:** `last_n_days` filters on **`approx_origin_date`** (estimated wall-post date), not `unlock_date` (when you purchased). Use `-Days 365` or edit `origin_days_filter` in the SQL if recent unlocks have older wall origins.
+**Purchases + images (`_purchs_imgs_incl`):** `sql_script/media_origin_date_tracker_multi_author_purchs_imgs_incl.sql` — purchases unlocks with optional images (`include_images_filter`; default include). Adds `media_kind` (`video` / `image`). Filters **`approx_origin_date`** by inclusive calendar years (`origin_year_filter`: start = newer, end = older).
+
+**Note (video-only purchases day windows):** `last_n_days` filters on **`approx_origin_date`** (estimated wall-post date), not `unlock_date` (when you purchased). Use `-Days 365` or edit `origin_days_filter` in the SQL if recent unlocks have older wall origins.
 
 | Script | Description |
 |--------|-------------|
-| `sql_script/run_media_origin_tracker_by_days_purchases.ps1` | Unlocked media for **30, 60, 90, 180, 365**-day `approx_origin_date` windows |
+| `sql_script/run_media_origin_tracker_by_days_purchases.ps1` | Unlocked **videos** for **30, 60, 90, 180, 365**-day `approx_origin_date` windows |
+| `sql_script/run_media_origin_tracker_purchs_imgs_incl.ps1` | Unlocked media; prompts for **start/end year** and **include images?** (or `-StartYear` / `-EndYear` / `-IncludeImages:$false`) |
 
 ```powershell
 .\sql_script\run_media_origin_tracker_by_days_purchases.ps1
+.\sql_script\run_media_origin_tracker_purchs_imgs_incl.ps1
+.\sql_script\run_media_origin_tracker_purchs_imgs_incl.ps1 -StartYear 2025 -EndYear 2023 -IncludeImages:$false
 .\sql_script\run_media_origin_tracker_by_days_purchases.ps1 -Days 365
 ```
 
@@ -425,7 +443,17 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-ConfigPath`, `-DuckDb
 
 **Typical caught-up incremental run:** API returns the latest posts first. Landing batches have `batchMax < dbMax`, all IDs already in DB (`insertCount === 0`) → high-watermark stop fires immediately; no scroll loop.
 
-**Gap backfill tradeoff:** High-watermark stop at the top can end the run **before** scrolling to older pages below DB `min` (e.g. missing posts between DB oldest and the 730-day cutoff). Those gaps insert via `postedAt < min` only if a run reaches those API batches (`insertCount > 0` prevents early stop). For a full history sweep within the window, set `wall_scrape_force_backfill=1`, `chat_scrape_force_backfill=1`, and/or `purchases_scrape_force_backfill=1` in `config.env` (or `& '.\local_run\local_setup\set_config_force_backfill.ps1' -Enable` to set all three).
+**Historical wall scrape** (`local_run/scrape_wall_historical.ps1` or `node … wall --hist-start=YYYY --hist-end=YYYY`):
+
+- **Start year** = newer (e.g. 2022); **end year** = older (e.g. 2019). Requires `start >= end`.
+- After wall profile load, opens the date filter dropdown (`btn dropdown-toggle … has-tooltip`), chooses **Go to date**, and jumps to the earliest valid day of the start year.
+- Insert/stop window is `postedAt >= endYear-01-01` (not the rolling 730-day max-age).
+- High-watermark stop is suppressed only through landing + date jump, then **early quit** uses DB max **within** `[endYear-01-01, startYear-01-01]` (not recent feed max), same rule as regular wall (`insertCount === 0`), unless `wall_scrape_force_backfill=1`.
+- **No** force-backfill soft-delete (avoids expiring recent posts not seen in this pass).
+- Also stops when the raw batch’s **newest** `postedAt` is older than the end year (`end_year`), or `hasMore=false` / 500-scroll safety cap.
+- Does not auto-run the media origin tracker.
+
+**Gap backfill tradeoff:** High-watermark stop at the top can end the run **before** scrolling to older pages below DB `min` (e.g. missing posts between DB oldest and the 730-day cutoff). Those gaps insert via `postedAt < min` only if a run reaches those API batches (`insertCount > 0` prevents early stop). For a full history sweep within the window, set `wall_scrape_force_backfill=1`, `chat_scrape_force_backfill=1`, and/or `purchases_scrape_force_backfill=1` in `config.env` (or `& '.\local_run\local_setup\set_config_force_backfill.ps1' -Enable` to set all three). For calendar-year ranges older than the 730-day window, use **historical wall scrape** instead.
 
 | `wall_scrape_force_backfill` | `0` (default) — incremental; stop when batch newest &lt; DB high watermark with no new rows |
 | `wall_scrape_force_backfill` | `1` — skip high-watermark stop; scroll for gap backfill until cutoff or `hasMore=false` |
