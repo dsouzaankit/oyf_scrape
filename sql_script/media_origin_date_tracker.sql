@@ -7,7 +7,7 @@ USE web;
 with t12 as (
 select id chat_id
 , json_extract_string(fromUser, '$.id') author_id
-, mediaCount media_count
+, mediaCount n_media
 , price msg_price
 , cast(createdAt as timestamp) created_ts
 , date(cast(createdAt as timestamp)) created_date
@@ -19,8 +19,8 @@ where expired_ts is null
 select chat_id, author_id
 , cast(json_extract_string(media, '$.id') as bigint) media_id
 , msg_price
-, cast(json_extract_string(media, '$.duration') AS int) media_duration
-, media_count
+, cast(json_extract_string(media, '$.duration') AS int) duration
+, n_media
 , sum(coalesce(cast(json_extract_string(media, '$.duration') AS int), 0)) over (
     partition by chat_id
     rows between unbounded preceding and unbounded following) tot_duration_per_msg
@@ -31,6 +31,9 @@ from t12
 select json_extract_string(author, '$.id') author_id
 , cast(postedAt as timestamp) posted_ts
 , date(cast(postedAt as timestamp)) posted_date
+, id wall_post_id
+, "text" wall_text
+, tipsAmount wall_price
 , unnest(media) media
 from stg_wall_posts
 where expired_ts is null
@@ -63,25 +66,44 @@ select author_id, posted_date
 from t2_intv
 group by 1,2
 )
+, wall_media_exact as (
+select author_id
+, cast(json_extract_string(media, '$.id') as bigint) media_id
+, posted_date wall_date
+, wall_post_id
+, wall_text
+, wall_price
+from t21
+qualify row_number() over (
+	partition by author_id, cast(json_extract_string(media, '$.id') as bigint)
+	order by posted_ts desc
+) = 1
+)
 
 select
 --*
-t1.created_date, t1.media_id, t1.media_duration, t1.msg_price
-, t1.media_count, round(t1.media_duration * 1.0 / t1.tot_duration_per_msg, 2) duration_ratio
+t1.created_date, t1.media_id, t1.duration, t1.msg_price
+, t1.n_media, round(t1.duration * 1.0 / t1.tot_duration_per_msg, 2) duration_ratio
 --, t1.tot_duration_per_msg tot_durtn_per_msg
 , coalesce(t2g.posted_date, date '1900-01-01') approx_origin_date
+, w.wall_date
+, w.wall_price
+, w.wall_text
 --, t2g.first_media_id_v2, t2g.last_media_id_v2
 --count(1) n_rows, count(distinct row(t1.media_id, t1.created_ts)) n_messages
 from t1 left join t2_intv_grpd t2g
 --from t2_intv_grpd
 on t1.media_id >= t2g.first_media_id_v2 and t1.media_id < t2g.last_media_id_v2
+left join wall_media_exact w
+	on t1.author_id = w.author_id
+	and t1.media_id = w.media_id
 where year(coalesce(t2g.posted_date, current_date)) >= 2025
 -- filter for videos
-and t1.media_duration > 0
+and t1.duration > 0
 --and media_id = 4261547299
 --where posted_date between date '2025-12-01' and date '2026-01-31'
 -- One row per message (chat_id) that contains the media; re-sent media in newer messages still appears on both rows.
 qualify row_number() over (partition by t1.author_id, t1.media_id, t1.chat_id order by created_date desc) = 1
-order by duration_ratio desc, media_duration desc
+order by duration_ratio desc, duration desc
 --order by created_date desc
 ;

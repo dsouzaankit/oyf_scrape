@@ -331,11 +331,11 @@ Then rerun `node node_script/web_scrape.js chat` or `wall`.
 
 ## Media origin reporting
 
-Maps chat `media_id` to an approximate wall-post date (`approx_origin_date`) by comparing media ID bands on wall posts. Each output row is one **message** (`chat_id` = `stg_chat_messages.id`). If the same `media_id` was sent in multiple messages, **all** matching messages appear (not just the latest).
+Maps chat `media_id` to an approximate wall-post date (`approx_origin_date`) by comparing media ID bands on wall posts. Each output row is one **message** that contains the media (deduped on `(author_id, media_id, chat_id)` internally). If the same `media_id` was sent in multiple messages, **all** matching messages appear (not just the latest).
 
-**Output columns:** `author_id`, `chat_id`, `msg_text`, `created_date`, `media_id`, `media_duration`, `msg_price`, `media_count`, `duration_ratio`, `approx_origin_date`.
+**Output columns:** `msg_text`, `created_date`, `media_id`, `duration`, `msg_price`, `n_media`, `duration_ratio`, `approx_origin_date`, plus when the same `media_id` appears on the wall: `wall_date`, `wall_price` (staging `tipsAmount`; no separate PPV price column today), `wall_text` (null if not on wall).
 
-**Dedup:** `QUALIFY` keeps one row per `(author_id, media_id, chat_id)` — re-sent promo clips in newer messages no longer collapse to a single “latest” row.
+**Dedup:** `QUALIFY` keeps one row per `(author_id, media_id, chat_id)` — re-sent promo clips in newer messages no longer collapse to a single “latest” row. `author_id` / `chat_id` are not selected in the report output.
 
 **Inspect one media_id:** uncomment `media_id_filter` in the SQL file, e.g. `select unnest([4458229438::bigint]) as media_id`, then run `run_media_origin_tracker.ps1`.
 
@@ -357,7 +357,7 @@ Built-in optional filters (edit CTEs in the SQL file, or let PS1 inject values):
 
 ### Purchases / unlocked media origin
 
-**SQL:** `sql_script/media_origin_date_tracker_multi_author_purchases.sql` — same wall-band `approx_origin_date` logic, but sources **`stg_chat_unlocks`** (purchased media). Output: `unlock_id`, `unlock_date`, `media_id`, `media_duration`, `msg_price`, `duration_ratio`, `approx_origin_date`.
+**SQL:** `sql_script/media_origin_date_tracker_multi_author_purchases.sql` — same wall-band `approx_origin_date` logic, but sources **`stg_chat_unlocks`** (purchased media). Output: `msg_text`, `unlock_date`, `media_id`, `duration`, `msg_price`, `n_media`, `duration_ratio`, `approx_origin_date`, plus `wall_date` / `wall_price` / `wall_text` when that `media_id` is also on the wall (`author_id` / `unlock_id` used for dedup only, not selected).
 
 **Note:** `last_n_days` filters on **`approx_origin_date`** (estimated wall-post date), not `unlock_date` (when you purchased). Use `-Days 365` or edit `origin_days_filter` in the SQL if recent unlocks have older wall origins.
 

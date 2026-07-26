@@ -33,7 +33,7 @@ with author_filter as (
 select id unlock_id
 , cast(fromUser.id as varchar) author_id
 , "text" msg_text
-, mediaCount media_count
+, mediaCount n_media
 , price msg_price
 , cast(createdAt as timestamp) unlock_ts
 , date(cast(createdAt as timestamp)) unlock_date
@@ -45,8 +45,8 @@ where fromUser.id is not null
 select unlock_id, author_id, msg_text
 , media.id media_id
 , msg_price
-, cast(media.duration AS int) media_duration
-, media_count
+, cast(media.duration AS int) duration
+, n_media
 , sum(coalesce(cast(media.duration AS int), 0)) over (
     partition by unlock_id
     rows between unbounded preceding and unbounded following) tot_duration_per_msg
@@ -57,6 +57,9 @@ from t12
 select json_extract_string(author, '$.id') author_id
 , cast(postedAt as timestamp) posted_ts
 , date(cast(postedAt as timestamp)) posted_date
+, id wall_post_id
+, "text" wall_text
+, tipsAmount wall_price
 , unnest(media) media
 from stg_wall_posts
 where json_extract_string(author, '$.id') is not null
@@ -92,24 +95,41 @@ select author_id, posted_date
 from t2_intv
 group by author_id, posted_date
 )
+, wall_media_exact as (
+select author_id
+, cast(json_extract_string(media, '$.id') as bigint) media_id
+, posted_date wall_date
+, wall_post_id
+, wall_text
+, wall_price
+from t21
+qualify row_number() over (
+	partition by author_id, cast(json_extract_string(media, '$.id') as bigint)
+	order by posted_ts desc
+) = 1
+)
 
 select
-t1.author_id
-, t1.unlock_id
-, t1.msg_text
+t1.msg_text
 , t1.unlock_date
 , t1.media_id
-, t1.media_duration
+, t1.duration
 , t1.msg_price
-, t1.media_count
-, round(t1.media_duration * 1.0 / t1.tot_duration_per_msg, 2) duration_ratio
+, t1.n_media
+, round(t1.duration * 1.0 / t1.tot_duration_per_msg, 2) duration_ratio
 , coalesce(t2g.posted_date, date '1900-01-01') approx_origin_date
+, w.wall_date
+, w.wall_price
+, w.wall_text
 from t1
 left join t2_intv_grpd t2g
 	on t1.author_id = t2g.author_id
 	and t1.media_id >= t2g.first_media_id_v2
 	and t1.media_id < t2g.last_media_id_v2
-where t1.media_duration > 0
+left join wall_media_exact w
+	on t1.author_id = w.author_id
+	and t1.media_id = w.media_id
+where t1.duration > 0
 and (
 	(select count(*) from author_filter) = 0
 	or t1.author_id in (select author_id from author_filter)
@@ -132,5 +152,5 @@ and (
 )
 -- One row per unlock message (unlock_id) that contains the media.
 qualify row_number() over (partition by t1.author_id, t1.media_id, t1.unlock_id order by unlock_date desc) = 1
-order by t1.author_id, duration_ratio desc, media_duration desc
+order by duration_ratio desc, duration desc
 ;
