@@ -1,5 +1,5 @@
--- Track approximate wall-post origin date for unlocked (purchased) chat media, per author.
--- Sources stg_chat_unlocks (paid chat purchases), not stg_chat_messages.
+-- Track approximate wall-post origin date for unlocked (purchased) media, per author.
+-- Sources stg_all_unlocks (posts/paid/all: post + message unlocks), not stg_chat_messages.
 -- Optional author filter: empty list = all authors; add IDs to restrict.
 -- Optional msg text filter: empty list = all unlock messages; add substrings to match (case-insensitive).
 -- Optional media_id filter: empty list = all media; add bigint IDs to restrict.
@@ -31,18 +31,19 @@ with author_filter as (
 )
 , t12 as (
 select id unlock_id
-, cast(fromUser.id as varchar) author_id
+, cast(author.id as varchar) author_id
+, unlockSource ulk_src
 , "text" msg_text
 , mediaCount n_media
 , price msg_price
-, cast(createdAt as timestamp) unlock_ts
-, date(cast(createdAt as timestamp)) unlock_date
+, cast(unlockAt as timestamp) unlock_ts
+, date(cast(unlockAt as timestamp)) unlock_date
 , unnest(media) media
-from stg_chat_unlocks
-where fromUser.id is not null
+from stg_all_unlocks
+where author.id is not null
 )
 , t1 as (
-select unlock_id, author_id, msg_text
+select unlock_id, author_id, ulk_src, msg_text
 , media.id media_id
 , msg_price
 , cast(media.duration AS int) duration
@@ -112,6 +113,7 @@ qualify row_number() over (
 select
 t1.msg_text
 , t1.unlock_date
+, t1.ulk_src
 , t1.media_id
 , t1.duration
 , t1.msg_price

@@ -21,7 +21,7 @@
 /*
 Issues, TBD:
 latest messages not being scraped from chat thread?
-get unlocked media_ids from posts/paid/chat (purchases mode → stg_chat_unlocks)   x
+get unlocked media_ids from posts/paid/all (purchases mode → stg_all_unlocks)   x
   exclude unlocks from media_origin_date_tracker_multi_author.sql output   x
 detech an update based on json payload checksum mismatch, and store history in media_dim   x
 test multiple author_id     x not needed
@@ -123,7 +123,7 @@ function parseScrapeMode() {
     console.error('Usage: node web_scrape.js <chat|wall|purchases> [--hist-start=YYYY --hist-end=YYYY]');
     console.error('  chat       — scrape chat thread messages (stg_chat_messages + media_dim)');
     console.error('  wall       — scrape wall posts (stg_wall_posts)');
-    console.error('  purchases  — scrape paid chat unlocks (stg_chat_unlocks)');
+    console.error('  purchases  — scrape paid unlocks posts+messages (stg_all_unlocks)');
     console.error('  wall + --hist-start/--hist-end — historical wall (date-picker jump; end-year stop)');
     console.error('Interactive: node web_scrape_repl.js');
     process.exit(1);
@@ -1555,10 +1555,12 @@ async function waitForChatOrLoginUi(timeoutMs = 90000, options = {}) {
                 }
             }
             await page.waitForFunction(
-                () => document.querySelector('.b-chats__scrollbar')
-                    || document.querySelector('input[type="email"]')
-                    || document.querySelector('input[name="password"], input[type="password"]'),
-                { timeout: Math.min(15000, remaining) }
+                (emailSel, passwordSel) => document.querySelector('.b-chats__scrollbar')
+                    || document.querySelector(emailSel)
+                    || document.querySelector(passwordSel),
+                { timeout: Math.min(15000, remaining) },
+                LOGIN_EMAIL_SELECTOR,
+                LOGIN_PASSWORD_SELECTOR
             );
             return true;
         } catch (err) {
@@ -1861,6 +1863,106 @@ async function cdpGotoPage(navPage, url, timeout = 75000) {
     throw new Error(`Navigation timeout for ${url}`);
 }
 
+const LOGIN_EMAIL_SELECTOR = [
+    'input[name="email"]',
+    'input[type="email"]',
+    'input[name="username"]',
+    'input[autocomplete*="username"]',
+    'input[autocomplete*="email"]',
+    'input[inputmode="email"]',
+    'input[at-attr="input"][name="email"]',
+].join(', ');
+
+const LOGIN_PASSWORD_SELECTOR = [
+    'input[name="password"]',
+    'input[type="password"]',
+    'input[at-attr="input"][name="password"]',
+].join(', ');
+
+async function isSelectorVisible(selector) {
+    try {
+        return await page.$$eval(selector, (els) => els.some((el) => {
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none'
+                && style.visibility !== 'hidden'
+                && rect.width > 0
+                && rect.height > 0;
+        }));
+    } catch {
+        return false;
+    }
+}
+
+/** First visible ElementHandle for selector, or null. */
+async function firstVisibleHandle(selector) {
+    const handles = await page.$$(selector);
+    for (const handle of handles) {
+        try {
+            if (typeof handle.isVisible === 'function') {
+                if (await handle.isVisible()) return handle;
+            } else {
+                const visible = await handle.evaluate((el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && rect.width > 0
+                        && rect.height > 0;
+                });
+                if (visible) return handle;
+            }
+        } catch (_) {}
+    }
+    return null;
+}
+
+/**
+ * Fill a Material/Angular login input. ElementHandle.type often does not stick;
+ * prefer click + keyboard, then native value setter + input/change events.
+ * Logs char counts only (never the secret).
+ */
+async function fillLoginInput(handle, value, label) {
+    const expected = String(value ?? '');
+    if (!expected) {
+        console.log(`${label} fill skipped: empty value in config.env`);
+        return false;
+    }
+    await handle.click({ delay: 20 }).catch(() => {});
+    await sleepMs(150);
+    await handle.focus().catch(() => {});
+    // Select-all clear (Ctrl/Meta+A) then type via keyboard — more reliable than handle.type on OF.
+    const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+    await page.keyboard.down(mod);
+    await page.keyboard.press('KeyA');
+    await page.keyboard.up(mod);
+    await page.keyboard.press('Backspace');
+    await page.keyboard.type(expected, { delay: 20 });
+    await sleepMs(100);
+
+    let len = await handle.evaluate((el) => (el.value || '').length).catch(() => 0);
+    if (len < expected.length) {
+        console.log(`${label} keyboard fill incomplete (${len}/${expected.length}); trying native setter...`);
+        await handle.evaluate((el, val) => {
+            const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+            desc.set.call(el, val);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            try {
+                el.dispatchEvent(new InputEvent('input', {
+                    bubbles: true,
+                    data: val,
+                    inputType: 'insertText',
+                }));
+            } catch (_) {}
+        }, expected);
+        await sleepMs(100);
+        len = await handle.evaluate((el) => (el.value || '').length).catch(() => 0);
+    }
+    console.log(`${label} fill: ${len}/${expected.length} chars in field`);
+    return len > 0 && len === expected.length;
+}
+
 async function attemptLogin() {
     page = await refreshPageIfDetached(process.env.chat_thread);
     if (await isChatThreadReady()) {
@@ -1875,40 +1977,55 @@ async function attemptLogin() {
         // Stepped login: email → Enter → password appears → submit (then captcha).
         if (await isEmailFieldVisible()) {
             logStep('Login step 1: email...');
-            await page.waitForSelector('input[type="email"]', { timeout: 10000 });
-            const existing = await page.$eval('input[type="email"]', (el) => el.value || '').catch(() => '');
-            if (existing !== (process.env.of_usern || '')) {
-                await page.click('input[type="email"]', { clickCount: 3 }).catch(() => {});
-                await page.keyboard.press('Backspace').catch(() => {});
-                await page.type('input[type="email"]', process.env.of_usern || '', { delay: 15 });
+            await page.waitForSelector(LOGIN_EMAIL_SELECTOR, { timeout: 10000, visible: true });
+            const emailHandle = await firstVisibleHandle(LOGIN_EMAIL_SELECTOR);
+            if (!emailHandle) {
+                throw new Error('Email field reported visible but no handle found');
             }
-            await page.focus('input[type="email"]').catch(() => {});
+            const existing = await emailHandle.evaluate((el) => el.value || '').catch(() => '');
+            if (existing !== (process.env.of_usern || '')) {
+                const ok = await fillLoginInput(emailHandle, process.env.of_usern || '', 'Email');
+                if (!ok) {
+                    throw new Error('Email field did not accept of_usern');
+                }
+            } else {
+                console.log('Email field already matches of_usern; pressing Enter...');
+            }
+            await emailHandle.focus().catch(() => {});
             await page.keyboard.press('Enter');
             console.log('Pressed Enter after email; waiting for password field...');
             try {
-                await page.waitForSelector('input[name="password"], input[type="password"]', {
+                await page.waitForSelector(LOGIN_PASSWORD_SELECTOR, {
                     timeout: 30000,
                     visible: true,
                 });
             } catch (_) {
                 // Some builds need the form continue button instead of Enter.
                 await attemptLoginFormSubmit();
-                await page.waitForSelector('input[name="password"], input[type="password"]', {
+                await page.waitForSelector(LOGIN_PASSWORD_SELECTOR, {
                     timeout: 20000,
                     visible: true,
                 });
             }
-            await sleepMs(600);
+            await sleepMs(800);
+        } else {
+            console.log(
+                'Email/username field not detected; continuing at password step if present...'
+            );
         }
 
         if (await isPasswordFieldVisible()) {
             logStep('Login step 2: password...');
-            const pwSelector = (await page.$('input[name="password"]'))
-                ? 'input[name="password"]'
-                : 'input[type="password"]';
-            await page.click(pwSelector, { clickCount: 3 }).catch(() => {});
-            await page.keyboard.press('Backspace').catch(() => {});
-            await page.type(pwSelector, process.env.of_paswd || '', { delay: 15 });
+            // Re-query after animation; prior handle can be detached.
+            const pwHandle = await firstVisibleHandle(LOGIN_PASSWORD_SELECTOR);
+            if (!pwHandle) {
+                throw new Error('Password field reported visible but no handle found');
+            }
+            const ok = await fillLoginInput(pwHandle, process.env.of_paswd || '', 'Password');
+            if (!ok) {
+                throw new Error('Password field did not accept of_paswd (Angular input?)');
+            }
+            await sleepMs(300);
             await attemptLoginFormSubmit();
         } else {
             console.log('Password field did not appear after email; manual login backup may be needed.');
@@ -1925,16 +2042,16 @@ async function attemptLogin() {
 
 async function attemptLoginFormSubmit() {
     try {
-        const result = await page.evaluate(() => {
-            const email = document.querySelector('input[type="email"]');
-            const password = document.querySelector('input[name="password"], input[type="password"]');
+        const result = await page.evaluate((emailSel, passwordSel) => {
+            const email = document.querySelector(emailSel);
+            const password = document.querySelector(passwordSel);
             const form = (password || email)?.closest('form');
             const btn = form?.querySelector('button[type="submit"]')
                 || document.querySelector('button[type="submit"]');
             if (!btn) return { ok: false, reason: 'no submit button' };
             btn.click();
             return { ok: true, step: password ? 'password' : 'email' };
-        });
+        }, LOGIN_EMAIL_SELECTOR, LOGIN_PASSWORD_SELECTOR);
         if (result.ok) {
             console.log(`Clicked login form submit (${result.step || 'form'}).`);
         } else {
@@ -1967,19 +2084,11 @@ async function isChatThreadReady() {
 }
 
 async function isEmailFieldVisible() {
-    try {
-        return !!(await page.$('input[type="email"]'));
-    } catch {
-        return false;
-    }
+    return isSelectorVisible(LOGIN_EMAIL_SELECTOR);
 }
 
 async function isPasswordFieldVisible() {
-    try {
-        return !!(await page.$('input[name="password"], input[type="password"]'));
-    } catch {
-        return false;
-    }
+    return isSelectorVisible(LOGIN_PASSWORD_SELECTOR);
 }
 
 /** True when any login step is showing (email-only or password), and chat UI is not ready. */
@@ -2070,6 +2179,15 @@ async function attemptLoginSubmitAfterCaptchaIfNeeded(options = {}) {
         // Only auto-submit once the password step is showing (avoid re-submitting email-only).
         if (await isPasswordFieldVisible()) {
             if (lastSubmitMs === 0 || now - lastSubmitMs >= submitIntervalMs) {
+                const pwHandle = await firstVisibleHandle(LOGIN_PASSWORD_SELECTOR);
+                const pwLen = pwHandle
+                    ? await pwHandle.evaluate((el) => (el.value || '').length).catch(() => 0)
+                    : 0;
+                const wantLen = String(process.env.of_paswd || '').length;
+                if (pwHandle && wantLen > 0 && pwLen < wantLen) {
+                    console.log('Password field empty/incomplete before captcha re-submit; re-filling...');
+                    await fillLoginInput(pwHandle, process.env.of_paswd || '', 'Password');
+                }
                 console.log('Submitting login form (password step; captcha may have auto-resolved)...');
                 await attemptLoginFormSubmit();
                 lastSubmitMs = now;
@@ -2647,20 +2765,20 @@ function filterChatMessagesByMinCreatedAt(list, minCreatedAtMs) {
     });
 }
 
-async function getChatUnlocksCreatedAtBoundsMs(minCreatedAtMs) {
-    const windowTs = minCreatedAtMs != null
-        ? new Date(minCreatedAtMs).toISOString().replace('T', ' ').replace('Z', '')
+async function getAllUnlocksUnlockAtBoundsMs(minUnlockAtMs) {
+    const windowTs = minUnlockAtMs != null
+        ? new Date(minUnlockAtMs).toISOString().replace('T', ' ').replace('Z', '')
         : null;
     const connection = await instance.connect();
     try {
         const reader = await connection.runAndReadAll(`
             SELECT
-                min(cast(createdAt AS timestamp)) FILTER (WHERE cast(createdAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_min_ts,
-                max(cast(createdAt AS timestamp)) FILTER (WHERE cast(createdAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_max_ts,
-                count(*) FILTER (WHERE cast(createdAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_cnt,
-                min(cast(createdAt AS timestamp)) AS abs_min_ts,
+                min(cast(unlockAt AS timestamp)) FILTER (WHERE cast(unlockAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_min_ts,
+                max(cast(unlockAt AS timestamp)) FILTER (WHERE cast(unlockAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_max_ts,
+                count(*) FILTER (WHERE cast(unlockAt AS timestamp) >= timestamp '${windowTs || '1970-01-01'}') AS win_cnt,
+                min(cast(unlockAt AS timestamp)) AS abs_min_ts,
                 count(*) AS total_cnt
-            FROM stg_chat_unlocks
+            FROM stg_all_unlocks
         `);
         const row = reader.getRows()[0];
         if (!row || Number(row[4]) === 0) {
@@ -2695,6 +2813,11 @@ async function getChatUnlocksCreatedAtBoundsMs(minCreatedAtMs) {
     } finally {
         await connection.disconnectSync();
     }
+}
+
+/** @deprecated use getAllUnlocksUnlockAtBoundsMs */
+async function getChatUnlocksCreatedAtBoundsMs(minCreatedAtMs) {
+    return getAllUnlocksUnlockAtBoundsMs(minCreatedAtMs);
 }
 
 function getBatchMinMaxPostedAtMs(list) {
@@ -2795,6 +2918,17 @@ async function ensureWallPostsPriceColumn(connection) {
     }
 }
 
+/** purchases: wall vs chat origin label on stg_all_unlocks. */
+async function ensureAllUnlocksUnlockSourceColumn(connection) {
+    try {
+        await connection.run(`ALTER TABLE stg_all_unlocks ADD COLUMN IF NOT EXISTS unlockSource VARCHAR`);
+    } catch (err) {
+        if (!/does not exist|Catalog Error/i.test(String(err.message))) {
+            throw err;
+        }
+    }
+}
+
 async function ensureScrapeExpiredColumns() {
     const connection = await instance.connect();
     try {
@@ -2802,6 +2936,7 @@ async function ensureScrapeExpiredColumns() {
             await ensureScrapeExpiredColumn(connection, tableName);
         }
         await ensureWallPostsPriceColumn(connection);
+        await ensureAllUnlocksUnlockSourceColumn(connection);
     } finally {
         await connection.disconnectSync();
     }
@@ -3125,15 +3260,61 @@ function wallPostsApiUrlMatches(url) {
     return url.includes('/posts') && url.includes('publish_date_desc');
 }
 
-// paid/chat unlocks are message-shaped (fromUser, createdAt), not wall posts
-function trimChatUnlockListForDb(list) {
-    return list.map(msg => {
-        const { isMarkdownDisabled, ...rest } = msg;
-        return {
-            ...rest,
-            media: (msg.media || []).map(trimMediaBlob),
-        };
+/** Normalize post + message unlocks from posts/paid/all into a shared shape for stg_all_unlocks. */
+function normalizeUnlockForDb(item) {
+    if (!item || item.id == null) return null;
+    const author = item.author || item.fromUser;
+    const unlockAt = item.postedAt || item.createdAt;
+    if (!unlockAt) return null;
+    const responseType = item.responseType || (item.postedAt ? 'post' : 'message');
+    const unlockSource = responseType === 'post' || item.postedAt
+        ? 'wall'
+        : 'chat';
+    return {
+        responseType,
+        unlockSource, // 'wall' | 'chat' — clearer than API responseType post/message
+        id: item.id,
+        author,
+        text: item.text ?? '',
+        price: item.price,
+        mediaCount: item.mediaCount,
+        isOpened: item.isOpened,
+        isMediaReady: item.isMediaReady,
+        unlockAt,
+        media: (item.media || []).map(trimMediaBlob),
+    };
+}
+
+function normalizeUnlockListForDb(list) {
+    return (list || []).map(normalizeUnlockForDb).filter(Boolean);
+}
+
+function getBatchMinMaxUnlockAtMs(list) {
+    if (!list?.length) return { minMs: null, maxMs: null };
+    let minMs = null;
+    let maxMs = null;
+    for (const row of list) {
+        if (!row?.unlockAt) continue;
+        const t = new Date(row.unlockAt).getTime();
+        if (!Number.isFinite(t)) continue;
+        if (minMs === null || t < minMs) minMs = t;
+        if (maxMs === null || t > maxMs) maxMs = t;
+    }
+    return { minMs, maxMs };
+}
+
+function filterUnlocksByMinUnlockAt(list, minUnlockAtMs) {
+    if (minUnlockAtMs == null || !list?.length) return list || [];
+    return list.filter((row) => {
+        if (!row?.unlockAt) return false;
+        const t = new Date(row.unlockAt).getTime();
+        return Number.isFinite(t) && t >= minUnlockAtMs;
     });
+}
+
+/** @deprecated legacy message-shaped trim; prefer normalizeUnlockListForDb */
+function trimChatUnlockListForDb(list) {
+    return normalizeUnlockListForDb(list);
 }
 
 async function queryRows(connection, tableName) {
@@ -3488,12 +3669,10 @@ async function loadChatToDb(filePath, tableName, runDatetime) {
 }
 
 async function scrollUpChat() {
-    scrollableSelector = '.b-chats__scrollbar'; // Replace with your element's selector
+    const scrollableSelector = '.b-chats__scrollbar';
+    page = await refreshPageIfDetached(process.env.chat_thread).catch(() => page);
+    await page.waitForSelector(scrollableSelector, { timeout: 60000 });
 
-    // Wait for the element to be present
-    await page.waitForSelector(scrollableSelector);
-
-    // Scroll the element up by 100 pixels using page.evaluate()
     await page.evaluate((selector, pixelsToScrollUp) => {
         const element = document.querySelector(selector);
         if (element) {
@@ -3502,10 +3681,8 @@ async function scrollUpChat() {
         } else {
             console.error(`Cannot find selector ${selector}`);
         }
-    }, scrollableSelector, 2000); // Pass the selector and pixels amount (1k) as arguments
+    }, scrollableSelector, 2000);
 
-    // add a wait here to observe the scroll action if headless: false
-    // let { setTimeout } = require('node:'); // Do not use with puppeteer!
     await page.evaluate(() => new Promise(r => setTimeout(r, 2000)));
 }
 
@@ -3562,23 +3739,28 @@ async function loadWallPostsToDb(filePath, tableName, jsonResp) {
     }
 }
 
-async function loadChatUnlocksToDb(filePath, tableName) {
+async function loadAllUnlocksToDb(filePath, tableName = 'stg_all_unlocks') {
     connection = await instance.connect();
     const duckPath = duckDbJsonPath(filePath);
     try {
         await ensureTableFromJson(connection, tableName, filePath);
+        await ensureAllUnlocksUnlockSourceColumn(connection);
         insertParts = await getTgtInsertParts(connection, tableName, 'cu', filePath);
-        // Message-shaped unlocks: watermark on createdAt (account-wide purchase feed)
+        // Unified unlocks: watermark on unlockAt; dedup on (responseType, id)
         insertTableSql = `INSERT INTO ${tableName} (${insertParts.colList}) SELECT ${insertParts.selectStr}
         FROM read_json_auto('${duckPath}', union_by_name=true) cu
         WHERE false
-        or cast(cu.createdAt as timestamp) < (
-            select coalesce(min(cast(createdAt as timestamp)), current_localtimestamp() + interval '1' day)
+        or cast(cu.unlockAt as timestamp) < (
+            select coalesce(min(cast(unlockAt as timestamp)), current_localtimestamp() + interval '1' day)
                 from ${tableName})
-        or cast(cu.createdAt as timestamp) > (
-            select coalesce(max(cast(createdAt as timestamp)), current_localtimestamp() - interval '99' year)
+        or cast(cu.unlockAt as timestamp) > (
+            select coalesce(max(cast(unlockAt as timestamp)), current_localtimestamp() - interval '99' year)
                 from ${tableName})
-        or not exists (select 1 from ${tableName} t where cast(t.id as bigint) = cast(cu.id as bigint))
+        or not exists (
+            select 1 from ${tableName} t
+            where cast(t.id as bigint) = cast(cu.id as bigint)
+              and cast(t.responseType as varchar) = cast(cu.responseType as varchar)
+        )
         RETURNING 1
         ;`;
         reader = await connection.runAndReadAll(insertTableSql);
@@ -3587,11 +3769,16 @@ async function loadChatUnlocksToDb(filePath, tableName) {
         await queryRows(connection, tableName);
         return insertCount;
     } catch (error) {
-        console.error("\nError loading chat unlock json into DuckDB:", error);
+        console.error("\nError loading all-unlocks json into DuckDB:", error);
         return 0;
     } finally {
         await connection.disconnectSync();
     }
+}
+
+/** @deprecated use loadAllUnlocksToDb */
+async function loadChatUnlocksToDb(filePath, tableName = 'stg_all_unlocks') {
+    return loadAllUnlocksToDb(filePath, tableName);
 }
 
 async function safePageEvaluate(pageFn, fallbackUrl) {
@@ -3795,6 +3982,22 @@ async function scrapeChatMessages() {
         }
         await page.reload({ waitUntil: 'domcontentloaded', timeout: 75000 });
         await sleepMs(2500);
+        page = await refreshPageIfDetached(process.env.chat_thread).catch(() => page);
+        // Reload tears down the SPA; wait for scrollbar again (pre-reload ready ≠ post-reload).
+        if (!(await isChatThreadReady())) {
+            if (await isLoginFormVisible()) {
+                logStep('Login form visible after chat reload; re-authenticating...');
+                await attemptLogin();
+                await attemptLoginSubmitAfterCaptchaIfNeeded({ captchaWaitMs: 120000 });
+            }
+            console.log('Waiting for chat thread UI after reload...');
+            await waitForChatOrLoginUi(90000);
+        }
+        if (!(await isChatThreadReady())) {
+            throw new Error(
+                'Chat thread UI (.b-chats__scrollbar) not ready after reload; cannot scroll for older messages.'
+            );
+        }
         await enqueueChatBatch(() => {});
         needToScrollUp = true;
         let scrollCount = 0;
@@ -4226,7 +4429,7 @@ let needToScrollDn = true;
     }
 }
 
-// document.getElementById(id).click() — confirmed working for Purchased / purchased-chat tabs.
+// document.getElementById(id).click() — confirmed working for Purchased tab.
 async function waitAndClickTab(elementId, labelHint = null) {
     const id = elementId.replace(/^#/, '');
     console.log(`Waiting for tab #${id}${labelHint ? ` (${labelHint})` : ''}...`);
@@ -4266,7 +4469,7 @@ async function waitAndClickTab(elementId, labelHint = null) {
     throw new Error(
         `Tab #${id} not found within 90s on ${targetUrl}. ` +
         'While logged in, open that URL in Chrome and check the Purchased tab id (DevTools). ' +
-        'Set purchases_tab_selector / purchases_click_selector in config.env if needed.'
+        'Set purchases_tab_selector in config.env if needed.'
     );
 }
 
@@ -4274,37 +4477,43 @@ async function clickTabById(elementId) {
     return waitAndClickTab(elementId);
 }
 
-// /posts/paid/chat: homepage → #Purchased → #purchased-chat (Messages).
-// Overrides: purchases_tab_selector / purchases_click_selector as element ids (with or without #).
-async function clickPaidChatTrigger() {
+// posts/paid/all: homepage → #Purchased (All tab fires mixed post + message unlocks).
+// Override: purchases_tab_selector as element id (with or without #).
+async function clickPurchasedTab() {
     const purchasedId = (process.env.purchases_tab_selector || 'Purchased').replace(/^#/, '');
-    const messagesId = (process.env.purchases_click_selector || 'purchased-chat').replace(/^#/, '');
 
-    console.log(`Purchases tabs: #${purchasedId} then #${messagesId}`);
+    console.log(`Purchases tab: #${purchasedId}`);
     await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
     await sleepMs(1500);
     await waitAndClickTab(purchasedId, 'Purchased');
-    await sleepMs(3000);
-    await waitAndClickTab(messagesId, 'Messages');
     await sleepMs(1500);
-    return `#${messagesId}`;
+    return `#${purchasedId}`;
+}
+
+/** @deprecated use clickPurchasedTab */
+async function clickPaidChatTrigger() {
+    return clickPurchasedTab();
+}
+
+function paidAllUnlocksApiUrlMatches(url) {
+    return typeof url === 'string' && url.includes('posts/paid/all');
 }
 
 async function scrapeChatUnlocks() {
     let needToScrollDn = true;
     let scrollCount = 0;
-    let sawPaidChat = false;
-    let resolveFirstPaidChat;
-    const firstPaidChat = new Promise((resolve) => { resolveFirstPaidChat = resolve; });
+    let sawPaidAll = false;
+    let resolveFirstPaidAll;
+    const firstPaidAll = new Promise((resolve) => { resolveFirstPaidAll = resolve; });
     const enqueuePurchasesBatch = createBatchQueue();
     const purchasesMaxAgeDays = process.env.wall_scrape_max_age_days || '730';
-    const purchasesMinCreatedAtMs = getChatScrapeMinCreatedAtMs();
+    const purchasesMinUnlockAtMs = getChatScrapeMinCreatedAtMs();
     const purchasesForceBackfill = isPurchasesScrapeForceBackfillEnabled();
 
-    logStep('Reading purchases createdAt bounds from DuckDB (before navigation)...');
+    logStep('Reading purchases unlockAt bounds from DuckDB (before navigation)...');
     resetApiOutAppendLogIfDebug();
     console.log(
-        `Purchases scrape window: createdAt >= ${new Date(purchasesMinCreatedAtMs).toISOString()} ` +
+        `Purchases scrape window: unlockAt >= ${new Date(purchasesMinUnlockAtMs).toISOString()} ` +
         `(wall_scrape_max_age_days=${purchasesMaxAgeDays})`
     );
     if (purchasesForceBackfill) {
@@ -4313,7 +4522,7 @@ async function scrapeChatUnlocks() {
             'scrolling until 730-day cutoff or hasMore=false (maiden-style gap backfill).'
         );
     }
-    const purchasesBounds = await getChatUnlocksCreatedAtBoundsMs(purchasesMinCreatedAtMs);
+    const purchasesBounds = await getAllUnlocksUnlockAtBoundsMs(purchasesMinUnlockAtMs);
     const purchasesLowWatermarkMs = purchasesBounds.minMs;
     const purchasesHighWatermarkMs = purchasesBounds.maxMs;
     const purchasesStopHint = purchasesForceBackfill
@@ -4335,7 +4544,7 @@ async function scrapeChatUnlocks() {
             `scrolling until cutoff or hasMore=false.`
         );
     } else {
-        console.log('No existing chat unlocks in DB; scrolling until cutoff or hasMore=false.');
+        console.log('No existing unlocks in stg_all_unlocks; scrolling until cutoff or hasMore=false.');
     }
 
     function evaluatePurchasesBatchStop(jsonResponse, trimmed, list, insertCount) {
@@ -4344,11 +4553,11 @@ async function scrapeChatUnlocks() {
             trimmed,
             inWindow: list,
             insertCount,
-            minWindowMs: purchasesMinCreatedAtMs,
+            minWindowMs: purchasesMinUnlockAtMs,
             maxAgeDays: purchasesMaxAgeDays,
             highWatermarkMs: purchasesHighWatermarkMs,
             forceBackfill: purchasesForceBackfill,
-            getBatchMinMax: getBatchMinMaxCreatedAtMs,
+            getBatchMinMax: getBatchMinMaxUnlockAtMs,
             label: 'Purchases',
             onStop: () => { needToScrollDn = false; },
         });
@@ -4356,29 +4565,32 @@ async function scrapeChatUnlocks() {
 
     let purchasesResponsesInFlight = 0;
     const onPurchasesResponse = async (response) => {
-        // Site fires on click (then scroll): /api2/v2/posts/paid/chat?limit=10&skip_users=all&format=infinite&offset=…
-        if (response.url().includes('/posts/paid/chat')) {
+        // Site fires on #Purchased click (then scroll): /api2/v2/posts/paid/all?...
+        if (paidAllUnlocksApiUrlMatches(response.url())) {
             purchasesResponsesInFlight += 1;
             try {
-                sawPaidChat = true;
-                resolveFirstPaidChat();
+                sawPaidAll = true;
+                resolveFirstPaidAll();
                 const jsonResponse = await response.json();
                 const rawList = jsonResponse['list'] || [];
                 enqueuePurchasesBatch(async () => {
-                    const trimmed = trimChatUnlockListForDb(rawList);
-                    const { minMs: batchMinMs, maxMs: batchMaxMs } = getBatchMinMaxCreatedAtMs(trimmed);
-                    const inWindow = filterChatMessagesByMinCreatedAt(trimmed, purchasesMinCreatedAtMs);
+                    const trimmed = normalizeUnlockListForDb(rawList);
+                    const { minMs: batchMinMs, maxMs: batchMaxMs } = getBatchMinMaxUnlockAtMs(trimmed);
+                    const inWindow = filterUnlocksByMinUnlockAt(trimmed, purchasesMinUnlockAtMs);
+                    const nWall = trimmed.filter((r) => r.unlockSource === 'wall').length;
+                    const nChat = trimmed.filter((r) => r.unlockSource === 'chat').length;
                     console.log(
-                        `Purchases API batch: ${trimmed.length} unlocks (${inWindow.length} within ${purchasesMaxAgeDays}-day window)` +
+                        `Purchases API batch: ${trimmed.length} unlocks ` +
+                        `(${nWall} wall / ${nChat} chat; ${inWindow.length} within ${purchasesMaxAgeDays}-day window)` +
                         (batchMaxMs != null ? `, newest ${new Date(batchMaxMs).toISOString()}` : '') +
                         (batchMinMs != null ? `, oldest ${new Date(batchMinMs).toISOString()}` : '')
                     );
                     let insertCount = 0;
                     if (inWindow.length > 0) {
                         const loadPath = writeApiOutBatch(inWindow);
-                        insertCount = await loadChatUnlocksToDb(loadPath, 'stg_chat_unlocks');
+                        insertCount = await loadAllUnlocksToDb(loadPath, 'stg_all_unlocks');
                     } else {
-                        console.log('Successfully loaded 0 rows into table "stg_chat_unlocks"');
+                        console.log('Successfully loaded 0 rows into table "stg_all_unlocks"');
                     }
                     evaluatePurchasesBatchStop(jsonResponse, trimmed, inWindow, insertCount);
                 });
@@ -4398,11 +4610,11 @@ async function scrapeChatUnlocks() {
         await page.evaluate(() => window.scrollTo(0, 500)).catch(() => {});
         await sleepMs(2000);
 
-        await clickPaidChatTrigger();
-        await Promise.race([firstPaidChat, sleepMs(20000)]);
-        if (!sawPaidChat) {
+        await clickPurchasedTab();
+        await Promise.race([firstPaidAll, sleepMs(20000)]);
+        if (!sawPaidAll) {
             throw new Error(
-                'No /posts/paid/chat XHR after click. Set purchases_click_selector in config.env to the correct control.'
+                'No /posts/paid/all XHR after #Purchased click. Set purchases_tab_selector in config.env if needed.'
             );
         }
 
@@ -4420,7 +4632,7 @@ async function scrapeChatUnlocks() {
         if (scrollCount >= 500 && needToScrollDn) {
             console.log('Purchases scroll stopped after 500 iterations (safety cap).');
         }
-        console.log('Chat unlocks (purchases) scrape complete.');
+        console.log('All unlocks (purchases) scrape complete.');
     } finally {
         page.off('response', onPurchasesResponse);
         await waitInFlightHandlers(() => purchasesResponsesInFlight);
@@ -4475,6 +4687,7 @@ function buildReplContext() {
         apiOpFile,
         of_web: (process.env.of_web || '').replace(/\/$/, ''),
         getPurchasesPageUrl,
+        clickPurchasedTab,
         clickPaidChatTrigger,
         scrapeChatMessages,
         scrapeWallPosts,
@@ -4486,6 +4699,7 @@ function buildReplContext() {
         waitForManualLoginBackup,
         loadChatToDb,
         loadWallPostsToDb,
+        loadAllUnlocksToDb,
         loadChatUnlocksToDb,
         scrollUpChat,
         scrollDnWall,

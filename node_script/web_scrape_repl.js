@@ -5,7 +5,7 @@
 //   node web_scrape_repl.js unlocks    # login + unlocks debug helpers
 //   node web_scrape.js --repl
 //
-// Unlocks (same workflow as wall: goto URL, scroll, intercept /posts/paid/chat):
+// Unlocks (goto URL, click #Purchased, scroll, intercept /posts/paid/all):
 //   Site XHR sends app-token, sign, time, user-id, x-bc, x-hash, x-of-rev — do not hand-build.
 //   await du.login()
 //   await du.gotoPurchases()
@@ -67,16 +67,11 @@ function buildUnlocksDebug(ctx) {
     }
 
     async function clickTrigger() {
-        // Inline sequence so REPL never depends on a stale clickPaidChatTrigger closure.
         const purchasedId = (process.env.purchases_tab_selector || 'Purchased').replace(/^#/, '');
-        const messagesId = (process.env.purchases_click_selector || 'purchased-chat').replace(/^#/, '');
-        console.log(`Purchases tabs: #${purchasedId} then #${messagesId}`);
+        console.log(`Purchases tab: #${purchasedId}`);
         await clickTabByIdOnPage(ctx.page, purchasedId);
-        await ctx.page.evaluate(() => new Promise(r => setTimeout(r, 3000)));
-        await ctx.page.waitForFunction((id) => !!document.getElementById(id), { timeout: 20000 }, messagesId);
-        await clickTabByIdOnPage(ctx.page, messagesId);
         await ctx.page.evaluate(() => new Promise(r => setTimeout(r, 1500)));
-        return `#${messagesId}`;
+        return `#${purchasedId}`;
     }
 
     async function scroll() {
@@ -90,12 +85,12 @@ function buildUnlocksDebug(ctx) {
     async function count() {
         return withConnection(async (connection) => {
             try {
-                const reader = await connection.runAndReadAll('SELECT COUNT(1) cnt FROM stg_chat_unlocks');
+                const reader = await connection.runAndReadAll('SELECT COUNT(1) cnt FROM stg_all_unlocks');
                 const n = reader.getRows()[0][0];
-                console.log('stg_chat_unlocks rows:', n);
+                console.log('stg_all_unlocks rows:', n);
                 return n;
             } catch (err) {
-                console.log('stg_chat_unlocks not available:', err.message);
+                console.log('stg_all_unlocks not available:', err.message);
                 return null;
             }
         });
@@ -104,12 +99,12 @@ function buildUnlocksDebug(ctx) {
     async function describe() {
         return withConnection(async (connection) => {
             try {
-                const reader = await connection.runAndReadAll('DESCRIBE stg_chat_unlocks');
+                const reader = await connection.runAndReadAll('DESCRIBE stg_all_unlocks');
                 const rows = reader.getRows();
                 console.table(rows.map(r => ({ column: r[0], type: r[1], null: r[2], key: r[3], default: r[4], extra: r[5] })));
                 return rows;
             } catch (err) {
-                console.log('stg_chat_unlocks not available:', err.message);
+                console.log('stg_all_unlocks not available:', err.message);
                 return null;
             }
         });
@@ -119,10 +114,10 @@ function buildUnlocksDebug(ctx) {
         return withConnection(async (connection) => {
             try {
                 const reader = await connection.runAndReadAll(`
-                    SELECT id, createdAt, price, mediaCount,
-                           json_extract_string(fromUser, '$.id') AS author_id
-                    FROM stg_chat_unlocks
-                    ORDER BY cast(createdAt AS timestamp) DESC
+                    SELECT id, responseType, unlockSource, unlockAt, price, mediaCount,
+                           json_extract_string(author, '$.id') AS author_id
+                    FROM stg_all_unlocks
+                    ORDER BY cast(unlockAt AS timestamp) DESC
                     LIMIT ${Number(n) || 3}
                 `);
                 const rows = reader.getRowsJson ? reader.getRowsJson() : reader.getRows();
@@ -140,7 +135,7 @@ function buildUnlocksDebug(ctx) {
             try {
                 const reader = await connection.runAndReadAll(`
                     SELECT DISTINCT cast(json_extract_string(m, '$.id') AS bigint) AS media_id
-                    FROM stg_chat_unlocks, unnest(media) AS u(m)
+                    FROM stg_all_unlocks, unnest(media) AS u(m)
                     ORDER BY media_id DESC
                     LIMIT ${Number(limit) || 20}
                 `);
@@ -156,13 +151,13 @@ function buildUnlocksDebug(ctx) {
 
     function help() {
         console.log(`
-stg_chat_unlocks (debugUnlocks / du) — same pattern as wall posts
+stg_all_unlocks (debugUnlocks / du) — posts/paid/all (post + message)
   Site sends signed XHR (app-token, sign, time, user-id, x-bc, x-hash, x-of-rev).
-  We only intercept /posts/paid/chat — no hand-built fetch.
+  We only intercept /posts/paid/all — no hand-built fetch.
 
   await du.login()
   await du.gotoPurchases()    # homepage (of_web)
-  await du.clickTrigger()     # #Purchased then #purchased-chat (Messages; fires /posts/paid/chat)
+  await du.clickTrigger()     # #Purchased — fires /posts/paid/all
   await du.scroll()           # further offsets (infinite)
   await du.run()              # full scrapeChatUnlocks()
   await du.count() | describe() | sample(3) | mediaIds(20)
@@ -180,7 +175,8 @@ async function startWebScrapeRepl() {
     const main = loadScrapeMain();
     const ctx = await main();
     const debugUnlocks = buildUnlocksDebug(ctx);
-    // Re-bind so scrapeChatUnlocks() / du.run() use the same two-step click.
+    // Re-bind so scrapeChatUnlocks() / du.run() use the same click.
+    ctx.clickPurchasedTab = () => debugUnlocks.clickTrigger();
     ctx.clickPaidChatTrigger = () => debugUnlocks.clickTrigger();
 
     if (unlocksMode) {

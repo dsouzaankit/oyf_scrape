@@ -63,3 +63,7 @@ SELECT
     column_count, 
     index_count 
 FROM duckdb_tables();
+
+DELETE FROM stg_wall_posts
+WHERE author.id = '24569249'
+AND date(postedAt) >= '2025-01-01';

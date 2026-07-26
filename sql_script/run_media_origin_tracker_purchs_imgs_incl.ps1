@@ -207,7 +207,7 @@ Write-Host "DB:        $DbPath"
 Write-Host "SQL:       $SqlPath"
 Write-Host "config.env: $configPath"
 Write-Host "author_id: $AuthorId"
-Write-Host "source:    stg_chat_unlocks ($mediaScope)"
+Write-Host "source:    stg_all_unlocks ($mediaScope)"
 Write-Host "years:     approx_origin_date in $EndYear .. $StartYear (inclusive)"
 Write-Host "images:    $(if ($IncludeImages) { 'included' } else { 'excluded' })"
 if (-not $Writable) {

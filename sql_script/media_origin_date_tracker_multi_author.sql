@@ -5,7 +5,7 @@
 -- Optional msg text filter: empty list = all messages; add substrings to match (case-insensitive).
 -- Optional media_id filter: empty list = all media; add bigint IDs to restrict.
 -- Optional origin days filter: null last_n_days = all dates; else approx_origin_date within last N days.
--- Excludes media_id values present in stg_chat_unlocks (paid chat purchases).
+-- Excludes media_id values present in stg_all_unlocks (paid purchases).
 
 -- await instance.closeSync();
 -- await connection.closeSync();
@@ -42,7 +42,7 @@ with author_filter as (
 	select distinct cast(json_extract_string(media, '$.id') as bigint) as media_id
 	from (
 		select unnest(media) media
-		from stg_chat_unlocks
+		from stg_all_unlocks
 	)
 	where media is not null
 )

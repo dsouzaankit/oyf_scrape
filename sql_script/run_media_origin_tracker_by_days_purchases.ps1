@@ -148,7 +148,7 @@ Write-Host "DB:        $DbPath"
 Write-Host "SQL:       $SqlPath"
 Write-Host "config.env: $configPath"
 Write-Host "author_id: $AuthorId (from config.env chat_thread)"
-Write-Host "source:    stg_chat_unlocks (purchased / unlocked media)"
+Write-Host "source:    stg_all_unlocks (purchased / unlocked media)"
 Write-Host "last_n_days windows (approx_origin_date): $($Days -join ', ')"
 if (-not $Writable) {
     Write-Host 'Mode:      read-only (pass -Writable to allow writes)'

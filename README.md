@@ -8,7 +8,7 @@ Puppeteer-based scraper that captures chat messages, wall posts, and paid chat u
 Browser (Puppeteer) → intercept XHR → api_out.json → DuckDB (web.db)
                                                       ├── stg_chat_messages
                                                       ├── stg_wall_posts
-                                                      ├── stg_chat_unlocks
+                                                      ├── stg_all_unlocks
                                                       ├── media_dim / media_dim_history  (chat scrape only)
                                                       └── dbt models (dbt_media_dim, …)
 
@@ -156,7 +156,7 @@ CREATE TABLE IF NOT EXISTS stg_wall_posts AS
 SELECT * FROM read_json_auto('P:/all_scripts/oyf_scrape/data/api_out.json', union_by_name=true)
 LIMIT 0;
 
--- stg_chat_unlocks is auto-created on first purchases scrape if missing
+-- stg_all_unlocks is auto-created on first purchases scrape if missing
 
 CREATE TABLE IF NOT EXISTS media_dim AS
 SELECT * FROM (VALUES
@@ -198,7 +198,7 @@ dbt test --project-dir webDataELT --profiles-dir .
 node node_script/web_scrape.js chat        # stg_chat_messages + media_dim
 node node_script/web_scrape.js wall        # stg_wall_posts
 node node_script/web_scrape.js wall --hist-start=2022 --hist-end=2019   # historical wall (date-picker jump)
-node node_script/web_scrape.js purchases   # stg_chat_unlocks (paid chat unlocks)
+node node_script/web_scrape.js purchases   # stg_all_unlocks (paid post + message unlocks)
 node node_script/web_scrape_repl.js        # interactive REPL (all modes)
 node node_script/web_scrape.js --repl      # same as web_scrape_repl.js
 ```
@@ -245,11 +245,11 @@ await shutdown()
 .exit
 ```
 
-### Debugging purchases (`stg_chat_unlocks`)
+### Debugging purchases (`stg_all_unlocks`)
 
 **Login:** same two-pass flow as chat/wall (`chat_thread` only — never site home for login). After login, navigates to the `of_web` base URL. Pass 2 full chat reload is skipped only when pass 1 already showed chat UI; otherwise pass 2 runs full login again before opening `of_web`.
 
-`/posts/paid/chat` is **not** loaded on homepage open alone — it fires when the **Messages** tab under Purchased is clicked (`#purchased-chat`). Do not hand-build signed `fetch` headers (causes HTTP 400); intercept the site XHR like wall posts.
+`/posts/paid/all` is **not** loaded on homepage open alone — it fires when the **Purchased** tab is clicked (`#Purchased`). The feed mixes wall and chat unlocks; both are normalized into `stg_all_unlocks` with `unlockSource` (`wall` | `chat`) plus API `responseType` (`post` | `message`). Do not hand-build signed `fetch` headers (causes HTTP 400); intercept the site XHR like wall posts.
 
 **Step-by-step:**
 
@@ -260,7 +260,7 @@ node node_script/web_scrape_repl.js unlocks
 ```javascript
 du.help()
 await du.gotoPurchases()   // homepage (of_web)
-await du.clickTrigger()    // #Purchased then #purchased-chat — Network: /posts/paid/chat?offset=0
+await du.clickTrigger()    // #Purchased — Network: /posts/paid/all?offset=0
 await du.scroll()          // further offsets if infinite scroll applies
 await du.count()
 await du.sample(3)
@@ -278,15 +278,15 @@ await du.run()             // full scrapeChatUnlocks() in one call
 |-----|------|
 | `of_web` | Site or creator base URL; purchases navigates here **after** chat-thread login (`of_web` home ok post-login) |
 | `purchases_page` | Optional override for homepage URL |
-| `purchases_tab_selector` | Optional; default `#Purchased` (first click) |
-| `purchases_click_selector` | Optional; default `#purchased-chat` (Messages; second click) |
+| `purchases_tab_selector` | Optional; default `#Purchased` |
 
-If a click misses, set the matching selector in `config.env` to the live CSS id/class.
+If a click misses, set `purchases_tab_selector` in `config.env` to the live CSS id.
 
 ### Per-run flow
 
 1. Before launch, clears Chrome session-restore files and sets `restore_on_startup=4` (single new tab; cookies kept in `testChromeSession/`). Picks the first stable launch tab — never calls `newPage()` during startup.
 2. **Login pass 1 — `initial`** (before DuckDB): opens `chat_thread`, waits for chat UI or login form, runs stepped `attemptLogin()` (**email → Enter → password** when the password field appears), focuses the browser window once. If automation stalls, waits up to **5 minutes** for **manual** email/password (+ captcha) in Chromium.
+   - **Email field patterns** (either may appear): **A** `input[name="email"]` with `type="text"` (often `autocomplete="username webauthn"`); **B** `input[type="email"]`. Password: `input[name="password"]` / `type="password"`.
 3. Opens `web.db` once (`DuckDBInstance.create`).
 4. **Login pass 2 — `before scrape`** (immediately before the scrape mode):
    - Skips full chat-thread reload **only** when pass 1 left `.b-chats__scrollbar` visible (`loginSessionReady`); still runs post-captcha submit if needed.
@@ -298,7 +298,7 @@ If a click misses, set the matching selector in `config.env` to the live CSS id/
 
 **Wall:** reads DB bounds **before navigation**; API is **newest-first** (`publish_date_desc`). Scrolls **down** for older posts. Typical incremental run exits early when landing batches are duplicates below DB `max(postedAt)`; otherwise scrolls to the **730-day** cutoff or `hasMore=false`.
 
-**Purchases:** navigates to `of_web` (its home is ok after login — **not** used as login entry), **clicks** `#Purchased` then `#purchased-chat` (overrides: `purchases_tab_selector`, `purchases_click_selector`), scrolls **down**, loads `stg_chat_unlocks`.
+**Purchases:** navigates to `of_web` (its home is ok after login — **not** used as login entry), **clicks** `#Purchased` (override: `purchases_tab_selector`), intercepts `/posts/paid/all`, normalizes post+message unlocks, scrolls **down**, loads `stg_all_unlocks`.
 
 **URL rules:** never navigate to the `of_web` **home** for **login** (anti-bot). Use `chat_thread` for both login passes. The `of_web` home is fine for purchases navigation after login; override with `purchases_page` if needed.
 
@@ -366,11 +366,11 @@ Built-in optional filters (edit CTEs in the SQL file, or let PS1 inject values):
 | `msg_text_filter` | Substring match on message text |
 | `media_id_filter` | Specific media IDs |
 | `origin_days_filter` | `approx_origin_date` within last N days (`null` = no limit) |
-| `unlocked_media` | Always excludes `media_id` values present in `stg_chat_unlocks` |
+| `unlocked_media` | Always excludes `media_id` values present in `stg_all_unlocks` |
 
 ### Purchases / unlocked media origin
 
-**SQL:** `sql_script/media_origin_date_tracker_multi_author_purchases.sql` — same wall-band `approx_origin_date` logic, but sources **`stg_chat_unlocks`** (purchased media). **Videos only** (`duration > 0`). Output: `msg_text`, `unlock_date`, `media_id`, `duration`, `msg_price`, `n_media`, `duration_ratio`, `approx_origin_date`, plus `wall_date` / `wall_price` / `wall_text` when that `media_id` is also on the wall (`author_id` / `unlock_id` used for dedup only, not selected).
+**SQL:** `sql_script/media_origin_date_tracker_multi_author_purchases.sql` — same wall-band `approx_origin_date` logic, but sources **`stg_all_unlocks`** (purchased post + message media). **Videos only** (`duration > 0`). Output: `msg_text`, `unlock_date`, `ulk_src` (`wall`/`chat`), `media_id`, `duration`, `msg_price`, `n_media`, `duration_ratio`, `approx_origin_date`, plus `wall_date` / `wall_price` / `wall_text` when that `media_id` is also on the wall (`author_id` / `unlock_id` used for dedup only, not selected).
 
 **Purchases + images (`_purchs_imgs_incl`):** `sql_script/media_origin_date_tracker_multi_author_purchs_imgs_incl.sql` — purchases unlocks with optional images (`include_images_filter`; default include). Adds `media_kind` (`video` / `image`). Filters **`approx_origin_date`** by inclusive calendar years (`origin_year_filter`: start = newer, end = older).
 
@@ -423,7 +423,7 @@ Parameters shared by both: `-HomeDirectory`, `-SqlPath`, `-ConfigPath`, `-DuckDb
 - **Or** when the message/post `id` is not already in the table (gap-fill inside the existing time range).
 - Chat: `NOT EXISTS` on `id` only (one thread per scrape).
 - Wall: `NOT EXISTS` on `(author.id, id)`.
-- Purchases: `NOT EXISTS` on `id` (account-wide unlock feed).
+- Purchases: `NOT EXISTS` on `(responseType, id)` (account-wide unlock feed).
 
 **Wall scroll stop** (scroll **down**, API `publish_date_desc` — newest batch first):
 
@@ -494,7 +494,7 @@ SQL: `sql_script/clear_expired_for_author.sql` (PS1 injects `author_id` into the
 | `media_dim` / `media_dim_history` (`refreshSrcMediaDim`) | **No** | Historical ledger — media stays recorded even if the source message was later withdrawn. |
 | `INSERT … NOT EXISTS` dedup | **No** | Expired rows still block duplicate inserts; re-seen API ids revive via `expired_ts = NULL` instead of re-inserting. |
 
-**Note:** `730` in `wall_scrape_max_age_days` is a **day count** (time window), not a row count. Logged post count (e.g. `260 posts`) is unrelated. The same window applies to **chat** and **purchases** (`createdAt`).
+**Note:** `730` in `wall_scrape_max_age_days` is a **day count** (time window), not a row count. Logged post count (e.g. `260 posts`) is unrelated. The same window applies to **chat** (`createdAt`) and **purchases** (`unlockAt`).
 
 ### Scalability at 1M+ rows (not implemented)
 
@@ -504,9 +504,9 @@ The scraper is tuned for **incremental** loads at typical scale: hundreds–low 
 
 | Operation | When | Cost at 1M+ |
 |-----------|------|-------------|
-| `getWallPostedAtBoundsMs` / `getChatCreatedAtBoundsMs` / `getChatUnlocksCreatedAtBoundsMs` | Once per scrape (before scroll) | Full scan / aggregate on `stg_*` (wall uses `author.id`; chat may scan whole table if no `chatUserId` column; purchases is account-wide on `createdAt`) |
+| `getWallPostedAtBoundsMs` / `getChatCreatedAtBoundsMs` / `getAllUnlocksUnlockAtBoundsMs` | Once per scrape (before scroll) | Full scan / aggregate on `stg_*` (wall uses `author.id`; chat may scan whole table if no `chatUserId` column; purchases is account-wide on `unlockAt`) |
 | `loadWallPostsToDb` / `loadChatToDb` | Every API batch (~10–50 rows) | **Per incoming row:** two correlated `min`/`max` subqueries + one `NOT EXISTS` ID probe |
-| `loadChatUnlocksToDb` | Purchases batches | Per-row `min`/`max` + `NOT EXISTS` ID dedup |
+| `loadAllUnlocksToDb` | Purchases batches | Per-row min/max `unlockAt` + `NOT EXISTS` on `(responseType, id)` |
 | `refreshSrcMediaDim` + `updateMediaDimHist` | After chat batches with inserts | Scales with batch media IDs + history table size (separate from wall) |
 
 Insert SQL pattern (wall example — chat is analogous on `createdAt` / `fromUser`):
@@ -530,7 +530,7 @@ Monitor growth: `node data/scripts/analyze_web_db.js` (read-only; safe during sc
 
 #### Refactor roadmap (priority)
 
-**1. Bind watermarks from JS (lowest effort)** — bounds are already computed before scroll (`getWallPostedAtBoundsMs`, `getChatCreatedAtBoundsMs`, `getChatUnlocksCreatedAtBoundsMs`). Pass `minMs` / `maxMs` as SQL literals in the `INSERT … SELECT` instead of per-row subqueries. Scroll-stop and insert logic stay in sync; removes ~2× table scans per batch row.
+**1. Bind watermarks from JS (lowest effort)** — bounds are already computed before scroll (`getWallPostedAtBoundsMs`, `getChatCreatedAtBoundsMs`, `getAllUnlocksUnlockAtBoundsMs`). Pass `minMs` / `maxMs` as SQL literals in the `INSERT … SELECT` instead of per-row subqueries. Scroll-stop and insert logic stay in sync; removes ~2× table scans per batch row.
 
 **2. Batch-scoped ID anti-join (medium)** — one lookup for the whole batch instead of `NOT EXISTS` per row:
 
@@ -564,7 +564,8 @@ CREATE INDEX IF NOT EXISTS idx_chat_fromuser_id ON stg_chat_messages (fromUser.i
 CREATE INDEX IF NOT EXISTS idx_chat_fromuser_created ON stg_chat_messages (fromUser.id, createdAt);
 
 -- purchases (account-wide feed; watermark is global min/max)
-CREATE INDEX IF NOT EXISTS idx_unlocks_created ON stg_chat_unlocks (createdAt);
+CREATE INDEX IF NOT EXISTS idx_unlocks_unlock_at ON stg_all_unlocks (unlockAt);
+CREATE INDEX IF NOT EXISTS idx_unlocks_type_id ON stg_all_unlocks (responseType, id);
 ```
 
 Indexes speed up bounds queries and batch anti-joins; they **do not** fix per-row correlated subqueries if insert SQL is left unchanged.
@@ -589,7 +590,7 @@ None of the above is implemented in `web_scrape.js` today; the correlated-subque
 
 **Maiden chat** (no rows / null bounds): high watermark stop does not apply; scroll continues until cutoff or `hasMore=false`.
 
-**Purchases scroll stop** (scroll **down**, `/posts/paid/chat`): same rules as wall/chat on account-wide `stg_chat_unlocks` (`createdAt`, `getChatUnlocksCreatedAtBoundsMs`). **`insertCount`** + ID dedup on `id`. Stops on `hasMore=false`, 730-day cutoff, high watermark (unless `purchases_scrape_force_backfill=1`), or 500-scroll safety cap. No low-watermark stop.
+**Purchases scroll stop** (scroll **down**, `/posts/paid/all`): same rules as wall/chat on account-wide `stg_all_unlocks` (`unlockAt`, `getAllUnlocksUnlockAtBoundsMs`). **`insertCount`** + dedup on `(responseType, id)`. Stops on `hasMore=false`, 730-day cutoff, high watermark (unless `purchases_scrape_force_backfill=1`), or 500-scroll safety cap. No low-watermark stop.
 
 **Media dimension** (`refreshSrcMediaDim` + `updateMediaDimHist`) runs after each chat batch and recalculates SCD Type 2 history for media IDs in that batch. **`media_dim` is a historical ledger** — it reads all `stg_chat_messages` rows (including `expired_ts` set) that match the incremental watermark rules. Only batch-affected rows are appended to `media_dim_history`; older runs are pruned to the last **N** distinct `extract_ts` values (`media_dim_history_retain_runs` in `config.env`, default **5**).
 
@@ -720,7 +721,7 @@ WHERE json_extract_string(cm.fromUser, '$.id') = '253745725'
 | `unknown key "replyToMessage"` | Ensure `union_by_name=true` on `read_json_auto` |
 | `Could not find key "hasCustomPreview"` | Media load uses `json_extract` in `getTgtInsertParts` |
 | `Table … does not have column "isMarkdownDisabled"` | Inserts use explicit column lists, not `INSERT BY NAME` with extra JSON fields |
-| Login submit redirects to `/my/chats/send` | Post-captcha submit runs only when the **login form** (`input[type="email"]` + password) is visible and chat UI (`.b-chats__scrollbar`) is not ready. Skipped when already on chat thread without login form, or when chat UI is loaded |
+| Login submit redirects to `/my/chats/send` | Post-captcha submit runs only when the **login form** (email field **A** `name="email"` / **B** `type="email"`, plus password) is visible and chat UI (`.b-chats__scrollbar`) is not ready. Skipped when already on chat thread without login form, or when chat UI is loaded |
 | Wrong author loaded from `config.env` | Comment inactive lines with `//` or `#`; only non-comment lines are parsed by `loadConfigEnv()` |
 | `The browser is already running for …testChromeSession` | Stale `lockfile` / `DevToolsActivePort` / `Singleton*`, or Puppeteer Chromium still holding the profile. Script kills orphan `.cache\puppeteer` chrome, clears dead locks, or reuses a live session — see **Chromium / profile session** above |
 | Chromium shows **Profile error occurred** | Usually stale locks or a crashed prior session. Script auto-repairs locks and relaunches once. If it persists: stop orphan Puppeteer Chrome (command above), then rename `data\testChromeSession` → `testChromeSession.bak` and rerun (re-login required) |
@@ -763,7 +764,7 @@ web_scrape/
     clear_expired_for_author.sql       # clear expired_ts for one author (chat + wall)
     run_media_origin_tracker.ps1       # single media-origin report
     run_media_origin_tracker_by_days.ps1  # report for 30/60/90/180/365-day windows
-    run_media_origin_tracker_by_days_purchases.ps1  # unlocked media origin (stg_chat_unlocks)
+    run_media_origin_tracker_by_days_purchases.ps1  # unlocked media origin (stg_all_unlocks)
     media_origin_date_tracker_multi_author.sql
     media_origin_date_tracker_multi_author_purchases.sql
     open_web_db.ps1                    # interactive DuckDB CLI on web.db

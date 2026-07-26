@@ -87,6 +87,7 @@ function mb(bytes) {
         ['stg_wall_posts', `SELECT COUNT(*) total, COUNT(DISTINCT id) distinct_ids,
             min(cast(postedAt as timestamp)) min_ts, max(cast(postedAt as timestamp)) max_ts
             FROM stg_wall_posts`],
+        ['stg_all_unlocks', 'SELECT COUNT(*) total FROM stg_all_unlocks'],
         ['stg_chat_unlocks', 'SELECT COUNT(*) total FROM stg_chat_unlocks'],
         ['media_dim', `SELECT COUNT(*) total, COUNT(DISTINCT media_id) distinct_media,
             COUNT(*) FILTER (WHERE is_current) current_rows FROM media_dim`],
