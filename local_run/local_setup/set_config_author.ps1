@@ -165,7 +165,7 @@ if (-not $AuthorId) {
     Write-Host 'Select author_id to activate:'
     for ($n = 0; $n -lt $pairs.Count; $n++) {
         $marker = if ($pairs[$n].IsActive) { '*' } else { ' ' }
-        Write-Host ("  [{0}] {1}{2}" -f $n + 1, $marker, $pairs[$n].AuthorId)
+        Write-Host ("  [{0}] {1}{2}" -f ($n + 1), $marker, $pairs[$n].AuthorId)
     }
 
     $choice = Read-Host 'Enter number or author_id'
