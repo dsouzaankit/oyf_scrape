@@ -286,9 +286,13 @@ function killStalePuppeteerChrome() {
     try {
         execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
             "Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*\\.cache\\puppeteer\\*' -and $_.Path -notlike '*\\Google\\Chrome\\Application\\*' } | Stop-Process -Force -ErrorAction SilentlyContinue"
-        ], { stdio: 'ignore', windowsHide: true });
+        ], { stdio: 'ignore', windowsHide: true, timeout: 8000 });
         console.log('Stopped orphan Puppeteer Chromium process(es).');
-    } catch (_) {}
+    } catch (err) {
+        if (err.killed || err.code === 'ETIMEDOUT') {
+            console.log('Orphan Puppeteer Chrome scan timed out; continuing...');
+        }
+    }
 }
 
 function killChromeProcessesUsingProfile(userDataDir) {
@@ -298,11 +302,16 @@ function killChromeProcessesUsingProfile(userDataDir) {
     const escaped = normalized.replace(/'/g, "''");
     const forward = normalized.replace(/\\/g, '/').replace(/'/g, "''");
     try {
+        // Timeout: a zombie Chrome on pCloud/exFAT can make Win32_Process enumeration hang forever.
         execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-            `$p = '${escaped}'; $pf = '${forward}'; Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and (($_.CommandLine -like "*--user-data-dir=*$p*") -or ($_.CommandLine -like "*--user-data-dir=*$pf*")) -and $_.CommandLine -notlike "*\\Google\\Chrome\\User Data*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`
-        ], { stdio: 'ignore', windowsHide: true });
+            `$p = '${escaped}'; $pf = '${forward}'; Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and (($_.CommandLine -like "*--user-data-dir=*$p*") -or ($_.CommandLine -like "*--user-data-dir=*$pf*") -or ($_.CommandLine -like "*$p*") -or ($_.CommandLine -like "*$pf*")) -and $_.CommandLine -notlike "*\\Google\\Chrome\\User Data*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; try { taskkill /F /T /PID $_.ProcessId 2>$null } catch {} }`
+        ], { stdio: 'ignore', windowsHide: true, timeout: 12000 });
         console.log('Stopped Chrome process(es) using this profile.');
-    } catch (_) {}
+    } catch (err) {
+        if (err.killed || err.code === 'ETIMEDOUT') {
+            console.log('Chrome profile process scan timed out (likely a stuck Chromium on a cloud/removable drive). Continuing...');
+        }
+    }
 }
 
 function prepareChromeProfileForLaunch(userDataDir) {
@@ -400,7 +409,9 @@ function assertProfileUnlocked(userDataDir) {
     if (fs.existsSync(lockPath)) {
         throw new Error(
             `Chromium profile still locked at ${userDataDir}. ` +
-            'Close all Chrome windows using this profile, then rerun.'
+            'Close all Chrome windows using this profile, then rerun. ' +
+            'If a chrome.exe is stuck (Status Unknown / taskkill fails) on a pCloud/removable drive, reboot to clear it, ' +
+            'or set use_local_chrome_profile=1 so the scraper uses %LOCALAPPDATA%\\web_scrape\\testChromeSession.'
         );
     }
 }
@@ -633,9 +644,12 @@ function isNetworkDrivePath(dirPath) {
     if (letter === 'Z') return true;
     try {
         const { execFileSync } = require('child_process');
+        // DriveType 2=Removable (pCloud/exFAT often shows as this), 4=Network.
+        // Chromium profiles on these hang, crash, or leave unkillable zombies.
         const script = [
             `$d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='${letter}:'" -ErrorAction SilentlyContinue`,
-            'if ($d -and $d.DriveType -eq 4) { "network" }',
+            'if ($d -and ($d.DriveType -eq 4 -or $d.DriveType -eq 2)) { "network" }',
+            'elseif ($d -and $d.VolumeName -match "pCloud|Koofr|Dropbox|OneDrive|Google Drive|rclone") { "cloud" }',
             'else {',
             `  $p = Get-PSDrive -Name '${letter}' -ErrorAction SilentlyContinue`,
             '  if ($p -and $p.DisplayRoot -match "^\\\\\\\\") { "unc" }',
@@ -643,8 +657,8 @@ function isNetworkDrivePath(dirPath) {
         ].join("\n");
         const out = execFileSync('powershell.exe', [
             '-NoProfile', '-NonInteractive', '-Command', script,
-        ], { encoding: 'utf8', windowsHide: true }).trim();
-        return /network|unc/i.test(out);
+        ], { encoding: 'utf8', windowsHide: true, timeout: 8000 }).trim();
+        return /network|unc|cloud/i.test(out);
     } catch {
         return false;
     }
