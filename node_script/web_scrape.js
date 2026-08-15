@@ -684,7 +684,6 @@ const CHROME_PROFILE_SEED_PATHS = [
     'Default/Web Data-journal',
     'Default/Secure Preferences',
     'Default/Local Storage',
-    'Default/Session Storage',
     'Default/Network',
 ];
 
@@ -696,6 +695,8 @@ const CHROME_PROFILE_SYNC_PATHS = [
 const LOCAL_PROFILE_EPHEMERAL_DIRS = [
     'Default/Cache',
     'Default/Code Cache',
+    // LevelDB on pCloud throws EIO / ERROR_IO_DEVICE; Chromium recreates this.
+    'Default/Session Storage',
 ];
 
 const LOCAL_PROFILE_GPU_DIRS = [
@@ -775,17 +776,68 @@ function seedLocalChromeProfile(localDir, remoteDir) {
     console.log(`Local Chrome profile ready (${copied} path(s) in ${((Date.now() - t0) / 1000).toFixed(1)}s)`);
 }
 
+function sleepMsSync(ms) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function copyChromeProfileDirBestEffort(src, dest) {
+    fs.mkdirSync(dest, { recursive: true });
+    let copiedAny = false;
+    let names;
+    try {
+        names = fs.readdirSync(src);
+    } catch (err) {
+        console.log(`  skipped dir ${path.basename(src)}: ${err.message}`);
+        return false;
+    }
+    for (const name of names) {
+        const childSrc = path.join(src, name);
+        const childDest = path.join(dest, name);
+        try {
+            const st = fs.statSync(childSrc);
+            if (st.isDirectory()) {
+                if (copyChromeProfileDirBestEffort(childSrc, childDest)) copiedAny = true;
+            } else {
+                fs.copyFileSync(childSrc, childDest);
+                copiedAny = true;
+            }
+        } catch (err) {
+            console.log(`  skipped ${path.basename(src)}/${name}: ${err.message}`);
+        }
+    }
+    return copiedAny;
+}
+
 function copyChromeProfilePath(src, dest) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     if (!fs.existsSync(src)) return false;
-    const stat = fs.statSync(src);
-    if (stat.isDirectory()) {
-        
-        fs.cpSync(src, dest, { recursive: true, force: true });
-    } else {
-        fs.copyFileSync(src, dest);
+    const maxAttempts = 3;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            const stat = fs.statSync(src);
+            if (stat.isDirectory()) {
+                fs.cpSync(src, dest, { recursive: true, force: true });
+            } else {
+                fs.copyFileSync(src, dest);
+            }
+            return true;
+        } catch (err) {
+            lastErr = err;
+            if (attempt < maxAttempts) {
+                console.log(`  copy retry ${attempt}/${maxAttempts - 1}: ${path.basename(src)} (${err.message})`);
+                sleepMsSync(250 * attempt);
+            }
+        }
     }
-    return true;
+    try {
+        if (fs.statSync(src).isDirectory() && copyChromeProfileDirBestEffort(src, dest)) {
+            console.log(`  copied ${path.basename(src)} (best-effort; some files skipped)`);
+            return true;
+        }
+    } catch (_) {}
+    console.log(`  skipped ${path.basename(src)}: ${lastErr.message}`);
+    return false;
 }
 
 function syncLocalChromeProfileToRemote() {
@@ -1662,7 +1714,7 @@ async function relaunchBrowserAfterProfileRepair() {
 ({ launchedBrowser, browser, weLaunched } = await launchAndConnectBrowser(
     puppeteerLauncher, browserStateDataFolder, browserLaunchOptions
 ));
-console.log('web_scrape.js build: nav-v57 (delete local profile after P: sync each run)');
+console.log('web_scrape.js build: nav-v59 (do not seed Session Storage from P:)');
 
 // Windows: raise Chromium to the OS foreground (CDP alone often leaves the window behind other apps).
 function focusChromeProcessWindow(rootPid) {

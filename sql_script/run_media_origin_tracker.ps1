@@ -63,7 +63,11 @@ if (-not (Test-Path -LiteralPath $SqlPath)) {
 if (-not (Test-Path -LiteralPath $DbPath)) {
     throw "DuckDB file not found: $DbPath"
 }
-if (-not (Test-Path -LiteralPath $DuckDbExe)) {
+$duckDbResolver = Join-Path $HomeDirectory 'local_run\local_setup\resolve_duckdb.ps1'
+if (Test-Path -LiteralPath $duckDbResolver) {
+    . $duckDbResolver
+    $DuckDbExe = Resolve-WebScrapeDuckDbExe -Preferred $DuckDbExe
+} elseif (-not (Test-Path -LiteralPath $DuckDbExe)) {
     $DuckDbExe = 'duckdb'
 }
 

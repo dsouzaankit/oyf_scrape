@@ -21,8 +21,8 @@ sql_script/media_origin_date_tracker_multi_author.sql  →  approx wall-post ori
 | `data/web.db` | DuckDB database (staging + dimension tables) |
 | `data/config.env` | Credentials, `chat_thread`, `wall_profile`, `of_web` (one author at a time) |
 | `data/testChromeSession/` | Persistent Chrome profile (cookies / session) |
-| `local_run/` | One-click scrape launchers (`scrape_*.ps1`) |
-| `local_run/local_setup/` | Author switchers, force-backfill / debug toggles, clear `expired_ts` for active author |
+| `local_run/` | One-click scrape launchers (`scrape_*.ps1` / `.cmd`) |
+| `local_run/local_setup/` | PC setup, author switchers, force-backfill / debug toggles, clear `expired_ts` for active author |
 | `sql_script/` | Ad-hoc DuckDB analysis, media-origin trackers, clear-expired soft-deletes |
 | `data/scripts/` | `compact_web_db` / `analyze_web_db` maintenance |
 | `dbt/webDataELT/` | dbt models for media dimension ELT |
@@ -32,13 +32,21 @@ Data root defaults to `P:\all_scripts\oyf_scrape` (set in `web_scrape.js` as `ho
 ## Prerequisites
 
 - **Node.js** 18+ (22+ tested)
-- **DuckDB CLI** (for `run_media_origin_tracker*.ps1`; default path in scripts: `C:\Users\dsouzaankit\Downloads\duckdb_cli-windows-amd64\duckdb.exe`)
+- **DuckDB CLI** (for `run_media_origin_tracker*.ps1`). Scripts resolve `duckdb` from `$env:WEB_SCRAPE_DUCKDB`, `%LOCALAPPDATA%\oyf_scrape\duckdb\`, PATH, then a legacy Downloads path.
 - **Python venv** + **dbt-duckdb** (optional, for dbt models)
 - Chromium via Puppeteer (`puppeteer`, `puppeteer-extra`, stealth plugin)
 
 ## Setup
 
-### 1. Install Node dependencies
+On a new Windows PC, run the idempotent installer (winget Node.js 22 + DuckDB CLI, npm into `%LOCALAPPDATA%\oyf_scrape`, Puppeteer Chromium). Does **not** overwrite `data/config.env` or `data/web.db`:
+
+```powershell
+& '.\local_run\local_setup\setup_this_pc.ps1'
+```
+
+`-SkipWinget` / `-SkipNpm` skip those steps if tools or deps are already present. Open a **new** PowerShell after the first run so `node` / `duckdb` are on PATH.
+
+### 1. Install Node dependencies (manual)
 
 `node_modules` must live on a **local disk** — the project root is on pCloud (`P:`),
 and cloud/network drives lock files during sync (`EBUSY`) and slow module loading.
@@ -53,7 +61,8 @@ npm install --prefix $dep
 ```
 
 To use a different location, set `WEB_SCRAPE_NODE_HOME` to the folder that contains
-`node_modules` (the wrappers derive `NODE_PATH` from it).
+`node_modules` (the wrappers derive `NODE_PATH` from it). `setup_this_pc.ps1` also
+sets `PUPPETEER_CACHE_DIR` to `%USERPROFILE%\.cache\puppeteer` (the scrape launchers do the same).
 
 ### 2. Data layout
 
@@ -207,10 +216,13 @@ Aliases: `chat_thread` / `messages`; `wall_posts` / `posts` / `wall_hist`; `unlo
 
 | Launcher | Runs |
 |----------|------|
-| `local_run/scrape_chat.ps1` | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`) |
-| `local_run/scrape_wall.ps1` | `node node_script/web_scrape.js wall` |
+| `local_run/scrape_chat.ps1` (or `.cmd`) | `node node_script/web_scrape.js chat` (tees to `logs/scrape_chat_*.log`); then origin tracker |
+| `local_run/scrape_wall.ps1` (or `.cmd`) | `node node_script/web_scrape.js wall`; then origin tracker |
 | `local_run/scrape_wall_historical.ps1` | Prompts for start (newer) / end (older) years → `wall --hist-start=… --hist-end=…` |
-| `local_run/scrape_purchases.ps1` | `node node_script/web_scrape.js purchases`; then `run_media_origin_tracker_by_days_purchases.ps1` |
+| `local_run/scrape_purchases.ps1` (or `.cmd`) | `node node_script/web_scrape.js purchases`; then `run_media_origin_tracker_by_days_purchases.ps1` |
+| `local_run/local_setup/setup_this_pc.ps1` | First-time PC setup: Node, DuckDB CLI, local npm + Chromium |
+
+**Windows 11 console:** double-click `.ps1` / `.cmd` reopens a **maximized** window (Windows PowerShell 5.1) so DuckDB tables are readable. Windows Terminal’s hidden ConPTY handle is not maximized (that overlay made title-bar / close / scroll unclickable). **Enter to exit** after the origin report is unchanged (tracker `Read-Host`; parent prompts again only if the scrape failed).
 | `local_run/local_setup/add_config_author.ps1` | Interactive add author URLs + create `set_config_author_<author_id>.ps1` |
 | `local_run/local_setup/set_config_author.ps1` | Activate one author in `data/config.env` (`chat_thread` + `wall_profile` pair) |
 | `local_run/local_setup/set_config_force_backfill.ps1` | Toggle `wall_scrape_force_backfill`, `chat_scrape_force_backfill`, and `purchases_scrape_force_backfill` (disable high-watermark stop for gap backfill; chat/wall also soft-delete unseen ids progressively + final sweep) |
@@ -319,7 +331,7 @@ Entry point is `async function main()` so CommonJS `require()` works with async 
 
 Persistent profile source: `data/testChromeSession/` on the data root (cookies/session).
 
-**Cloud/network drive (`P:` / pCloud):** Chromium often **crashes on navigation** when the profile lives on a cloud-synced or mapped network drive. The scraper **automatically uses a local copy** at `%LOCALAPPDATA%\web_scrape\testChromeSession` (one-time **auth-only** seed from `P:` — not a full 140MB copy). On shutdown it **syncs session cookies/login back** to `data/testChromeSession/` on `P:` (disable with `sync_chrome_profile_to_p=0`). Override with `chrome_user_data_dir` or `use_local_chrome_profile=0` in `config.env` to force the remote profile. Set `refresh_local_chrome_profile=1` once to wipe and re-seed the local profile.
+**Cloud/network drive (`P:` / pCloud):** Chromium often **crashes on navigation** when the profile lives on a cloud-synced or mapped network drive. The scraper **automatically uses a local copy** at `%LOCALAPPDATA%\web_scrape\testChromeSession` (auth-only seed from `P:` — not a full 140MB copy). **`Default/Session Storage` is not copied** (pCloud LevelDB hits `ERROR_IO_DEVICE` / `EIO`; Chromium recreates it). Other seed paths retry, then skip individual files instead of aborting the scrape. On shutdown it **syncs session cookies/login back** to `data/testChromeSession/` on `P:` (disable with `sync_chrome_profile_to_p=0`) and deletes the local profile so the next run re-seeds. Override with `chrome_user_data_dir` or `use_local_chrome_profile=0` in `config.env` to force the remote profile. Set `refresh_local_chrome_profile=1` once to wipe and re-seed the local profile.
 
 **Startup (`launchAndConnectBrowser`):**
 
@@ -730,6 +742,8 @@ WHERE json_extract_string(cm.fromUser, '$.id') = '253745725'
 | Page loads only after focusing/restoring Chromium | Chromium throttles background/occluded windows on Windows. Script uses anti-throttle launch flags and one-time `focusScrapeWindow()` before initial login |
 | `web.db` huge but `COUNT(*)` on `media_dim_history` is small | Prune `DELETE`s are logical only; run `.\data\scripts\compact_web_db.ps1` with scraper/CLI stopped. Run `node .\data\scripts\analyze_web_db.js --deep` to compare logical row counts vs on-disk segments. Copying `web.db` without its `.wal` can show stale row counts until checkpointed |
 | Multiple **Enter** presses to close a PS1 window | Several scripts end with `Read-Host` so a double-clicked console stays open. **Stacked prompts:** `scrape_chat.ps1` / `scrape_wall.ps1` call `run_media_origin_tracker_by_days.ps1`, which **always** prompts in a `finally` block; the parent prompts again **only on failure** — so a failed tracker after a successful scrape needs **two** Enters. **Early Enter:** a keypress while Node/DuckDB output is still streaming may not reach the prompt; wait for `Press Enter to…` before pressing. **Integrated terminal:** `set_config_force_backfill.ps1` skips the prompt when stdin is redirected; other scripts may still prompt |
+| First scrape dies copying Chrome `Session Storage` | pCloud cannot read that LevelDB; seed skips it (nav-v59). Retry the scrape. |
+| Win11 console maximized but title bar / close / scroll do not click | Do not `ShowWindow` the ConPTY hwnd. Launchers open a maximized window instead (`wt -M` / `start /max`). Use `scrape_chat.cmd` or the `.ps1` (it relaunches once). |
 
 Errors are also written to `logs/error_log_<timestamp>.log`.
 
@@ -743,10 +757,13 @@ web_scrape/
     package.json                       # node deps manifest (installed locally; see Setup)
     package-lock.json
   local_run/
-    scrape_chat.ps1
-    scrape_wall.ps1
-    scrape_purchases.ps1
+    scrape_chat.ps1 / .cmd              # .cmd = maximized 5.1 console (Win11)
+    scrape_wall.ps1 / .cmd
+    scrape_purchases.ps1 / .cmd
     local_setup/
+      setup_this_pc.ps1                 # winget Node + DuckDB, local npm + Chromium
+      resolve_duckdb.ps1                # find duckdb.exe without a hardcoded username path
+      maximize_console.ps1              # relaunch maximized; do not maximize WT ConPTY hwnd
       add_config_author.ps1             # interactive add author + one-click script
       set_config_author.ps1             # switch active author in config.env
       set_config_force_backfill.ps1      # toggle wall/chat/purchases scrape_force_backfill

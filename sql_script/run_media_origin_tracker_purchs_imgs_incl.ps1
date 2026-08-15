@@ -22,20 +22,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Maximize console window (full screen)
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public static class ConsoleWindow {
-    [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    public const int SW_MAXIMIZE = 3;
+$maximizeConsole = Join-Path $PSScriptRoot '..\local_run\local_setup\maximize_console.ps1'
+if (-not (Test-Path -LiteralPath $maximizeConsole)) {
+    $maximizeConsole = Join-Path $HomeDirectory 'local_run\local_setup\maximize_console.ps1'
 }
-"@
-$hwnd = [ConsoleWindow]::GetConsoleWindow()
-if ($hwnd -ne [IntPtr]::Zero) {
-    [void][ConsoleWindow]::ShowWindow($hwnd, [ConsoleWindow]::SW_MAXIMIZE)
-}
+. $maximizeConsole
+if (Restart-InConHostIfNeeded -ScriptPath $PSCommandPath -ScriptArgs (Get-BoundRestartArgs -Bound $PSBoundParameters)) { exit 0 }
+Maximize-HostConsoleWindow
 
 function Get-DotEnvValue {
     param(
@@ -157,7 +150,11 @@ if (-not (Test-Path -LiteralPath $SqlPath)) {
 if (-not (Test-Path -LiteralPath $DbPath)) {
     throw "DuckDB file not found: $DbPath"
 }
-if (-not (Test-Path -LiteralPath $DuckDbExe)) {
+$duckDbResolver = Join-Path $HomeDirectory 'local_run\local_setup\resolve_duckdb.ps1'
+if (Test-Path -LiteralPath $duckDbResolver) {
+    . $duckDbResolver
+    $DuckDbExe = Resolve-WebScrapeDuckDbExe -Preferred $DuckDbExe
+} elseif (-not (Test-Path -LiteralPath $DuckDbExe)) {
     $DuckDbExe = 'duckdb'
 }
 

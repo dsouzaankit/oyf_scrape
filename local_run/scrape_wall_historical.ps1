@@ -6,6 +6,9 @@ $HomeDirectory = if ($env:WEB_SCRAPE_HOME) { $env:WEB_SCRAPE_HOME } else { 'P:\a
 # node_modules lives on a local disk (pCloud/network drives lock/slow it); expose it to node via NODE_PATH.
 $DepsHome = if ($env:WEB_SCRAPE_NODE_HOME) { $env:WEB_SCRAPE_NODE_HOME } else { Join-Path $env:LOCALAPPDATA 'oyf_scrape' }
 $env:NODE_PATH = Join-Path $DepsHome 'node_modules'
+if (-not $env:PUPPETEER_CACHE_DIR) {
+    $env:PUPPETEER_CACHE_DIR = Join-Path $env:USERPROFILE '.cache\puppeteer'
+}
 $configPath = Join-Path $HomeDirectory 'data\config.env'
 $LogsFolder = Join-Path $HomeDirectory 'logs'
 New-Item -ItemType Directory -Force -Path $LogsFolder | Out-Null
